@@ -1,4 +1,6 @@
-   streamlit
-   sectionproperties
-   concreteproperties
-   matplotlib
+streamlit
+sectionproperties
+concreteproperties
+matplotlib
+shapely
+pandas
