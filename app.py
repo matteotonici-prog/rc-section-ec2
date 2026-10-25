@@ -150,6 +150,7 @@ if run:
 
     with tab5:
         # Uses `cr` (cracked properties) calculated in the Stiffness tab
+        cr = sec.calculate_cracked_properties(theta=0)
         sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_ser * 1e6)
 
         lo, hi = sres.get_concrete_stress_limits()
