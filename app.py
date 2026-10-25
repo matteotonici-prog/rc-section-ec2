@@ -81,8 +81,10 @@ if run:
         colour="grey",
     )
     geom = concrete_rectangular_section(
-        b=b, d=h, dia_top=dia_top, n_top=n_top, dia_bot=dia_bot, n_bot=n_bot,
-        n_circle=12, cover=cover, conc_mat=concrete, steel_mat=steel,
+        d=h, b=b,
+        dia_top=dia_top, area_top=math.pi * dia_top**2 / 4, n_top=n_top, c_top=cover,
+        dia_bot=dia_bot, area_bot=math.pi * dia_bot**2 / 4, n_bot=n_bot, c_bot=cover,
+        n_circle=4, conc_mat=concrete, steel_mat=steel,
     )
     sec = ConcreteSection(geom)
 
