@@ -10,10 +10,11 @@ from concreteproperties.stress_strain_profile import (
     RectangularStressBlock, SteelElasticPlastic, SteelHardening,
 )
 from sectionproperties.pre.geometry import Geometry
-from sectionproperties.pre.library import (
-    concrete_rectangular_section, concrete_tee_section, concrete_circular_section,
-)
-from sectionproperties.pre.library.concrete_sections import add_bar
+from sectionproperties.pre.library import concrete_circular_section
+from sectionproperties.pre.library.concrete_sections import add_bars
+
+MAX_LAYERS = 50
+PLOT_WIDTH = 0.8   # fraction of the page width used by each plot (1.0 = full width)
 
 CLASSES = {"C20/25": 20, "C25/30": 25, "C30/37": 30, "C32/40": 32, "C35/45": 35,
            "C40/50": 40, "C45/55": 45, "C50/60": 50, "C55/67": 55, "C60/75": 60,
@@ -47,9 +48,6 @@ def area(dia):
     return math.pi * dia**2 / 4
 
 
-PLOT_WIDTH = 0.8   # fraction of the page width used by each plot (1.0 = full width)
-
-
 def show(fig, width=PLOT_WIDTH):
     if width >= 1.0:
         st.pyplot(fig)
@@ -58,6 +56,23 @@ def show(fig, width=PLOT_WIDTH):
         with col:
             st.pyplot(fig)
     plt.close(fig)
+
+
+def check_bars(poly, bars):
+    """bars: list of (x, y, dia, label). Returns an error message or None."""
+    for x, y, d, lab in bars:
+        if d <= 0:
+            return f"{lab}: invalid bar diameter."
+        if not poly.contains(Point(x, y).buffer(d / 2)):
+            return (f"{lab}: the bar at ({x:.0f}, {y:.0f}) mm is not fully "
+                    "inside the concrete outline.")
+    for i in range(len(bars)):
+        xi, yi, di, li = bars[i]
+        for j in range(i + 1, len(bars)):
+            xj, yj, dj, lj = bars[j]
+            if math.hypot(xi - xj, yi - yj) < (di + dj) / 2 - 1e-6:
+                return f"Bars overlap: {li} and {lj}."
+    return None
 
 
 def bar_stress_table(sres):
@@ -103,6 +118,15 @@ def plot_bar_stresses(sec, df, title):
     return fig
 
 
+def layer_defaults(kind):
+    """Default reinforcement layers for the layer table."""
+    if kind == "Rectangular":
+        return pd.DataFrame({"y": [47.5, 557.0], "n": [4, 3],
+                             "dia": [25.0, 16.0], "c_side": [35.0, 35.0]})
+    return pd.DataFrame({"y": [47.5, 557.0], "n": [4, 6],
+                         "dia": [25.0, 16.0], "c_side": [35.0, 35.0]})
+
+
 st.title("RC section check - Eurocode 2")
 
 # Outside the form so the inputs below update as soon as the type changes
@@ -115,17 +139,15 @@ with st.form("inputs"):
     # ---------------- geometry ----------------
     st.subheader("Geometry (mm)")
     if shape == "Rectangular":
-        c1, c2, c3 = st.columns(3)
+        c1, c2 = st.columns(2)
         b = c1.number_input("Width b", 100.0, 3000.0, 300.0)
         h = c2.number_input("Overall depth h", 100.0, 3000.0, 600.0)
-        cover = c3.number_input("Cover to bar surface", 10.0, 100.0, 35.0)
     elif shape == "T-section":
         c1, c2 = st.columns(2)
         b = c1.number_input("Web width b", 100.0, 3000.0, 300.0)
         h = c2.number_input("Overall depth h", 100.0, 3000.0, 600.0)
         bf = c1.number_input("Flange width bf", 100.0, 6000.0, 1200.0)
         hf = c2.number_input("Flange depth hf", 50.0, 1000.0, 150.0)
-        cover = st.number_input("Cover to bar surface", 10.0, 100.0, 35.0)
     elif shape == "Circular":
         c1, c2 = st.columns(2)
         diam = c1.number_input("Diameter D", 200.0, 3000.0, 500.0)
@@ -142,13 +164,26 @@ with st.form("inputs"):
     # ---------------- reinforcement ----------------
     st.subheader("Reinforcement")
     if shape in ("Rectangular", "T-section"):
-        c1, c2 = st.columns(2)
-        label_top = ("Top bars (no.)" if shape == "Rectangular"
-                     else "Top bars in flange (no.)")
-        n_top = c1.number_input(label_top, 0, 30, 3)
-        dia_top = c1.number_input("Top bar dia (mm)", 6, 40, 16)
-        n_bot = c2.number_input("Bottom bars (no.)", 0, 30, 4)
-        dia_bot = c2.number_input("Bottom bar dia (mm)", 6, 40, 25)
+        st.caption(
+            f"Up to {MAX_LAYERS} layers. Each row is one layer of equally spaced "
+            "bars: y = height of the bar centres above the bottom face (mm); "
+            "n = number of bars; dia = bar diameter (mm); c_side = clear cover "
+            "from the section edge to the outer bars of that layer (mm)."
+            + (" In a T-section, a layer whose centre is within the flange "
+               "depth is spread across the flange width, otherwise across the "
+               "web." if shape == "T-section" else "")
+        )
+        layer_df = st.data_editor(
+            layer_defaults(shape), num_rows="dynamic", key=f"layers_{shape}",
+            column_config={
+                "y": st.column_config.NumberColumn("y (mm)", min_value=0.0),
+                "n": st.column_config.NumberColumn("n bars", min_value=1,
+                                                   step=1, format="%d"),
+                "dia": st.column_config.NumberColumn("dia (mm)", min_value=6.0),
+                "c_side": st.column_config.NumberColumn("c_side (mm)",
+                                                        min_value=0.0),
+            },
+        )
     elif shape == "Circular":
         c1, c2 = st.columns(2)
         n_bar = c1.number_input("Number of bars (equally spaced)", 2, 60, 8)
@@ -271,48 +306,101 @@ if run:
     )
 
     # ---------------- build geometry ----------------
-    if shape == "Rectangular":
-        geom = concrete_rectangular_section(
-            d=h, b=b,
-            dia_top=dia_top, area_top=area(dia_top), n_top=n_top, c_top=cover,
-            dia_bot=dia_bot, area_bot=area(dia_bot), n_bot=n_bot, c_bot=cover,
-            n_circle=4, conc_mat=concrete, steel_mat=steel,
-        )
-    elif shape == "T-section":
-        if hf >= h:
-            st.error("Flange depth must be less than the overall depth.")
-            st.stop()
-        geom = concrete_tee_section(
-            d=h, b=b, d_f=hf, b_f=bf,
-            dia_top=dia_top, area_top=area(dia_top), n_top=n_top, c_top=cover,
-            dia_bot=dia_bot, area_bot=area(dia_bot), n_bot=n_bot, c_bot=cover,
-            n_circle=4, conc_mat=concrete, steel_mat=steel,
-        )
-    elif shape == "Circular":
+    layer_note = ""
+    if shape == "Circular":
         geom = concrete_circular_section(
             d=diam, area_conc=area(diam), n_conc=64,
             dia_bar=dia_bar, area_bar=area(dia_bar), n_bar=n_bar, cover=cover,
             n_circle=4, conc_mat=concrete, steel_mat=steel,
         )
+        n_bars_total = int(n_bar)
+        as_total = n_bar * area(dia_bar)
     else:
-        pts = list(poly_df.dropna().itertuples(index=False, name=None))
-        bars = bar_df.dropna()
-        poly = Polygon(pts) if len(pts) >= 3 else None
-        if poly is None or not poly.is_valid or poly.area <= 0:
-            st.error("The outline needs at least 3 vertices and must not "
-                     "cross itself.")
-            st.stop()
-        if bars.empty:
+        # 1) concrete outline
+        if shape == "Rectangular":
+            poly = Polygon([(0, 0), (b, 0), (b, h), (0, h)])
+        elif shape == "T-section":
+            if hf >= h or bf <= b:
+                st.error("Need flange depth < overall depth and flange width "
+                         "> web width.")
+                st.stop()
+            poly = Polygon([(-b / 2, 0), (b / 2, 0), (b / 2, h - hf),
+                            (bf / 2, h - hf), (bf / 2, h), (-bf / 2, h),
+                            (-bf / 2, h - hf), (-b / 2, h - hf)])
+        else:
+            pts = list(poly_df.dropna().itertuples(index=False, name=None))
+            poly = Polygon(pts) if len(pts) >= 3 else None
+            if poly is None or not poly.is_valid or poly.area <= 0:
+                st.error("The outline needs at least 3 vertices and must not "
+                         "cross itself.")
+                st.stop()
+
+        # 2) list of bars (x, y, dia, label)
+        bar_list = []
+        if shape == "Custom (coordinates)":
+            for k, r in enumerate(bar_df.dropna().itertuples(index=False), 1):
+                bar_list.append((float(r.x), float(r.y), float(r.dia), f"Bar {k}"))
+        else:
+            lay = layer_df.dropna()
+            if lay.empty:
+                st.error("Add at least one reinforcement layer.")
+                st.stop()
+            if len(lay) > MAX_LAYERS:
+                st.error(f"A maximum of {MAX_LAYERS} layers is allowed.")
+                st.stop()
+            for i, r in enumerate(lay.itertuples(index=False), start=1):
+                n = int(round(r.n))
+                d, y, c = float(r.dia), float(r.y), float(r.c_side)
+                if n < 1 or d <= 0:
+                    st.error(f"Layer {i}: needs at least one bar and a "
+                             "positive diameter.")
+                    st.stop()
+                if shape == "Rectangular":
+                    xmin, xmax = 0.0, b
+                else:
+                    w = bf if y > h - hf else b
+                    xmin, xmax = -w / 2, w / 2
+                xa, xb = xmin + c + d / 2, xmax - c - d / 2
+                if n == 1:
+                    xs = [(xmin + xmax) / 2]
+                else:
+                    if xb <= xa:
+                        st.error(f"Layer {i}: the side covers leave no room "
+                                 "for the bars.")
+                        st.stop()
+                    spacing = (xb - xa) / (n - 1)
+                    if spacing < d - 1e-6:
+                        st.error(f"Layer {i}: {n} bars of {d:.0f} mm do not "
+                                 "fit (bars would overlap).")
+                        st.stop()
+                    xs = [xa + j * spacing for j in range(n)]
+                for x in xs:
+                    bar_list.append((x, y, d, f"Layer {i}"))
+            layer_note = f" in {len(lay)} layers"
+
+        if not bar_list:
             st.error("Add at least one reinforcing bar.")
             st.stop()
+        msg = check_bars(poly, bar_list)
+        if msg:
+            st.error(msg)
+            st.stop()
+
+        # 3) concrete + bars (one operation per bar diameter)
         geom = Geometry(geom=poly, material=concrete)
-        for row in bars.itertuples(index=False):
-            if row.dia <= 0 or not poly.contains(Point(row.x, row.y)):
-                st.error(f"Bar at ({row.x}, {row.y}) is outside the outline "
-                         "or has an invalid diameter.")
-                st.stop()
-            geom = add_bar(geom, area=area(row.dia), material=steel,
-                           x=row.x, y=row.y, n=4)
+        by_dia = {}
+        for x, y, d, _ in bar_list:
+            by_dia.setdefault(d, ([], []))
+            by_dia[d][0].append(x)
+            by_dia[d][1].append(y)
+        for d, (xs, ys) in by_dia.items():
+            geom = add_bars(geom, area=area(d), material=steel,
+                            x=xs, y=ys, n=4)
+        n_bars_total = len(bar_list)
+        as_total = sum(area(d) for _, _, d, _ in bar_list)
+
+    st.caption(f"Reinforcement: {n_bars_total} bars{layer_note}, "
+               f"total As = {as_total:,.0f} mm²")
 
     sec = ConcreteSection(geom)
     n_ed = n_kn * 1e3  # compression +ve
