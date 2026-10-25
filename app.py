@@ -2,6 +2,7 @@ import math
 import pandas as pd
 import streamlit as st
 import matplotlib.pyplot as plt
+from matplotlib.patches import Circle
 from shapely.geometry import Polygon, Point
 from concreteproperties import Concrete, ConcreteSection, SteelBar
 from concreteproperties.stress_strain_profile import (
@@ -36,6 +37,54 @@ def ec2_concrete(fck, acc, gamma_c):
 
 def area(dia):
     return math.pi * dia**2 / 4
+
+
+def show(fig):
+    st.pyplot(fig)
+    plt.close(fig)
+
+
+def bar_stress_table(sres):
+    """One row per reinforcing bar: position, diameter, stress, force."""
+    rows = []
+    for i, (g, s) in enumerate(
+        zip(sres.lumped_reinforcement_geometries,
+            sres.lumped_reinforcement_stresses), start=1
+    ):
+        cx, cy = g.calculate_centroid()
+        a = g.calculate_area()
+        s = float(s)
+        rows.append({
+            "Bar": i,
+            "x (mm)": round(cx, 1),
+            "y (mm)": round(cy, 1),
+            "Dia (mm)": round(math.sqrt(4 * a / math.pi), 1),
+            "Stress (MPa)": round(s, 1),
+            "Force (kN)": round(s * a / 1e3, 1),
+            "State": "compression" if s > 1e-6 else ("tension" if s < -1e-6 else "unstressed"),
+        })
+    return pd.DataFrame(rows)
+
+
+def plot_bar_stresses(sec, df, title):
+    """Section outline with every bar drawn to scale, coloured and labelled by stress."""
+    ax = sec.plot_section(render=False)
+    fig = ax.get_figure()
+    vmax = max(float(df["Stress (MPa)"].abs().max()), 1e-6)
+    norm = plt.Normalize(-vmax, vmax)
+    cmap = plt.cm.bwr
+    for _, r in df.iterrows():
+        ax.add_patch(Circle((r["x (mm)"], r["y (mm)"]), r["Dia (mm)"] / 2,
+                            facecolor=cmap(norm(r["Stress (MPa)"])),
+                            edgecolor="k", zorder=5))
+        ax.annotate(f'{int(r["Bar"])}: {r["Stress (MPa)"]:.0f}',
+                    (r["x (mm)"], r["y (mm)"]), xytext=(0, 12),
+                    textcoords="offset points", ha="center", fontsize=7,
+                    zorder=6)
+    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
+    fig.colorbar(sm, ax=ax, label="Bar stress (MPa), +ve compression")
+    ax.set_title(title)
+    return fig
 
 
 st.title("RC section check - Eurocode 2")
@@ -109,6 +158,16 @@ with st.form("inputs"):
     eud = c2.number_input("Steel ultimate strain εud", 0.01, 0.1, 0.0225,
                           format="%.4f")
 
+    # ---------------- stiffness basis ----------------
+    st.subheader("Stiffness and service stresses")
+    c1, c2 = st.columns(2)
+    basis = c1.radio(
+        "Concrete modulus to use",
+        ["Short-term (Ecm)", "Long-term (modular ratio n)"],
+    )
+    n_long = c2.number_input("Long-term modular ratio n = Es / Ec,eff",
+                             5.0, 30.0, 15.0)
+
     # ---------------- actions ----------------
     st.subheader("Design actions")
     c1, c2 = st.columns(2)
@@ -132,9 +191,14 @@ if run:
     dir_txt = "sagging" if sagging else "hogging"
     comp_face = "top" if sagging else "bottom"
 
+    # Concrete modulus for stiffness / service stresses (ULS is not affected)
+    long_term = basis.startswith("Long")
+    e_service = es / n_long if long_term else p["ecm"]
+    basis_txt = "Long-term" if long_term else "Short-term"
+
     concrete = Concrete(
         name=cls, density=2.4e-6,
-        stress_strain_profile=ConcreteLinear(elastic_modulus=p["ecm"]),
+        stress_strain_profile=ConcreteLinear(elastic_modulus=e_service),
         ultimate_stress_strain_profile=RectangularStressBlock(
             compressive_strength=p["fcd"],   # fcd already includes αcc
             alpha=p["eta"], gamma=p["lam"], ultimate_strain=p["ecu3"],
@@ -195,22 +259,22 @@ if run:
     sec = ConcreteSection(geom)
     n_ed = n_kn * 1e3  # compression +ve
 
-    # Cracked properties for the chosen direction, reused by tabs 4 and 5
+    # Cracked properties for the chosen direction and modulus, reused by tabs 4 and 5
     cr = sec.calculate_cracked_properties(theta=theta)
-    cr.calculate_transformed_properties(elastic_modulus=p["ecm"])
+    cr.calculate_transformed_properties(elastic_modulus=e_service)
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         ["Section", "Capacity", "M-N diagram", "Stiffness", "Stresses"]
     )
 
-    # ---------------- tab 1: section ----------------
+    # ---------------- tab 1: section (unchanged) ----------------
     with tab1:
-        st.pyplot(sec.plot_section(render=False).get_figure())
+        show(sec.plot_section(render=False).get_figure())
         st.caption(f"fcd = {p['fcd']:.1f} MPa, fyd = {fyd:.0f} MPa, "
                    f"λ = {p['lam']:.3f}, η = {p['eta']:.3f}, "
                    f"εcu3 = {p['ecu3']:.4f}, Ecm = {p['ecm']/1e3:.1f} GPa")
 
-    # ---------------- tab 2: capacity ----------------
+    # ---------------- tab 2: capacity + ULS stresses ----------------
     with tab2:
         res = sec.ultimate_bending_capacity(theta=theta, n=n_ed)
         m_rd = abs(res.m_xy) / 1e6
@@ -218,9 +282,23 @@ if run:
         c1.metric("M_Rd (kNm)", f"{m_rd:,.1f}")
         c2.metric("M_Ed (kNm)", f"{m_ed:,.1f}")
         c3.metric("Utilisation", f"{m_ed / m_rd:.2f}" if m_rd > 0 else "n/a")
-        st.caption(f"{dir_txt.capitalize()} bending, compression at {comp_face}.")
+        d_n = getattr(res, "d_n", None)
+        extra = f", neutral axis depth d_n = {d_n:,.0f} mm" if d_n else ""
+        st.caption(f"{dir_txt.capitalize()} bending, compression at {comp_face}, "
+                   f"with N_Ed = {n_kn:,.0f} kN{extra}.")
 
-    # ---------------- tab 3: M-N diagram, both directions ----------------
+        # Stresses at the ultimate limit state (section at M_Rd for this N_Ed)
+        uls = sec.calculate_ultimate_stress(ultimate_results=res)
+        st.subheader("Stresses at the ultimate limit state")
+        show(uls.plot_stress(render=False).get_figure())
+        df_uls = bar_stress_table(uls)
+        show(plot_bar_stresses(sec, df_uls, "Reinforcement stresses at ULS"))
+        st.dataframe(df_uls, hide_index=True)
+        st.caption("The stresses shown are those of the section at its "
+                   "ultimate capacity M_Rd for the applied axial force, not "
+                   "at M_Ed. Compression is positive.")
+
+    # ---------------- tab 3: M-N diagram (unchanged) ----------------
     with tab3:
         fig, ax = plt.subplots()
         for th, lab, style in [(0.0, "Sagging", "-b"), (math.pi, "Hogging", "-g")]:
@@ -229,8 +307,6 @@ if run:
             )
             n_list, m_list = mi.get_results_lists(moment="m_x")
             ms = [m / 1e6 for m in m_list]          # keep the real sign
-            # make sagging plot on the +ve side and hogging on the -ve side,
-            # whatever sign convention the library returns for theta = pi
             if (th == 0.0 and sum(ms) < 0) or (th != 0.0 and sum(ms) > 0):
                 ms = [-m for m in ms]
             ax.plot(ms, [n / 1e3 for n in n_list], style, label=lab)
@@ -241,38 +317,54 @@ if run:
         ax.set_ylabel("N (kN), compression +ve")
         ax.grid(True)
         ax.legend()
-        st.pyplot(fig)
+        show(fig)
 
     # ---------------- tab 4: stiffness ----------------
     with tab4:
-        tg = sec.get_transformed_gross_properties(elastic_modulus=p["ecm"])
+        tg = sec.get_transformed_gross_properties(elastic_modulus=e_service)
         i_hom = tg.ixx_c
         i_cr = cr.iuu_cr
+        st.markdown(f"**{basis_txt} stiffness**: Ec = {e_service / 1e3:.1f} GPa, "
+                    f"modular ratio n = Es/Ec = {es / e_service:.1f}")
         c1, c2, c3 = st.columns(3)
         c1.metric("I homogeneous (×10⁹ mm⁴)", f"{i_hom / 1e9:.3f}")
         c2.metric("I cracked (×10⁹ mm⁴)", f"{i_cr / 1e9:.3f}")
         c3.metric("I cracked / I homogeneous", f"{i_cr / i_hom:.2f}")
         c1, c2 = st.columns(2)
+        c1.metric("EI homogeneous (kNm²)", f"{e_service * i_hom * 1e-9:,.0f}")
+        c2.metric("EI cracked (kNm²)", f"{e_service * i_cr * 1e-9:,.0f}")
+        c1, c2 = st.columns(2)
         c1.metric("M_cr (kNm)", f"{cr.m_cr / 1e6:,.1f}")
         c2.metric("Neutral axis depth, cracked (mm)", f"{cr.d_nc:,.0f}")
-        st.caption(f"Transformed to concrete using Ecm (short-term). "
-                   f"{dir_txt.capitalize()} bending, compression at "
-                   f"{comp_face}. Cracking uses fctm.")
+        st.caption(f"Section transformed to concrete. {dir_txt.capitalize()} "
+                   f"bending, compression at {comp_face}. Cracking uses fctm.")
 
-    # ---------------- tab 5: stresses ----------------
+    # ---------------- tab 5: service stresses ----------------
     with tab5:
         sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_ser * 1e6)
         lo, hi = sres.get_concrete_stress_limits()
         sig_c = max(abs(lo), abs(hi))
-        sig_s = max(abs(s) for s in sres.lumped_reinforcement_stresses)
+        df_ser = bar_stress_table(sres)
+        worst = df_ser.loc[df_ser["Stress (MPa)"].abs().idxmax()]
+        sig_s = abs(float(worst["Stress (MPa)"]))
         fck = CLASSES[cls]
+
+        st.markdown(f"**{basis_txt} basis**: Ec = {e_service / 1e3:.1f} GPa "
+                    f"(n = {es / e_service:.1f}), M_ser = {m_ser:,.0f} kNm, "
+                    f"{dir_txt}")
         c1, c2 = st.columns(2)
         c1.metric("Max concrete stress (MPa)", f"{sig_c:.1f}")
-        c1.caption(f"EC2 7.2(2) limit 0.6·fck = {0.6 * fck:.1f} MPa → "
-                   f"ratio {sig_c / (0.6 * fck):.2f}")
+        c1.caption(f"EC2 7.2(2): 0.6·fck = {0.6 * fck:.1f} MPa "
+                   f"(ratio {sig_c / (0.6 * fck):.2f}), characteristic. "
+                   f"EC2 7.2(3): 0.45·fck = {0.45 * fck:.1f} MPa "
+                   f"(ratio {sig_c / (0.45 * fck):.2f}), quasi-permanent.")
         c2.metric("Max steel stress (MPa)", f"{sig_s:.0f}")
-        c2.caption(f"EC2 7.2(5) limit 0.8·fyk = {0.8 * fyk:.0f} MPa → "
-                   f"ratio {sig_s / (0.8 * fyk):.2f}")
-        st.pyplot(sres.plot_stress(render=False).get_figure())
-        st.caption(f"Linear-elastic cracked section, {dir_txt} bending, "
-                   "short-term Ecm, bending only (axial load not included).")
+        c2.caption(f"Bar {int(worst['Bar'])}. EC2 7.2(5): 0.8·fyk = "
+                   f"{0.8 * fyk:.0f} MPa (ratio {sig_s / (0.8 * fyk):.2f}).")
+
+        show(sres.plot_stress(render=False).get_figure())
+        show(plot_bar_stresses(sec, df_ser, "Reinforcement stresses (service)"))
+        st.dataframe(df_ser, hide_index=True)
+        st.caption("Linear-elastic cracked section, bending only (axial load "
+                   "not included). Compression is positive, so bars in "
+                   "tension show negative stress.")
