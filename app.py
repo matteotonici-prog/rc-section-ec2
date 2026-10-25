@@ -47,7 +47,7 @@ def area(dia):
     return math.pi * dia**2 / 4
 
 
-PLOT_WIDTH = 0.5   # fraction of the page width used by each plot (1.0 = full width)
+PLOT_WIDTH = 0.8   # fraction of the page width used by each plot (1.0 = full width)
 
 
 def show(fig, width=PLOT_WIDTH):
