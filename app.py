@@ -90,7 +90,7 @@ if run:
 
     n_ed = n_kn * 1e3  # compression +ve
 
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
         ["Section", "Capacity", "M-N diagram", "Stiffness", "Stresses"]
     )
 
