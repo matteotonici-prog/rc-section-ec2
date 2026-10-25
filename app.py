@@ -47,6 +47,7 @@ shape = st.selectbox(
 )
 
 with st.form("inputs"):
+    # ---------------- geometry ----------------
     st.subheader("Geometry (mm)")
     if shape == "Rectangular":
         c1, c2, c3 = st.columns(3)
@@ -65,18 +66,20 @@ with st.form("inputs"):
         diam = c1.number_input("Diameter D", 200.0, 3000.0, 500.0)
         cover = c2.number_input("Cover to bar surface", 10.0, 100.0, 40.0)
     else:
-        st.caption("Concrete outline: vertices in order (x, y) in mm, y pointing up. "
-                   "Add or delete rows as needed. Compression is at the top (+y).")
+        st.caption("Concrete outline: vertices in order (x, y) in mm, y pointing "
+                   "up. Add or delete rows as needed.")
         poly_df = st.data_editor(
             pd.DataFrame({"x": [0.0, 300.0, 300.0, 0.0],
                           "y": [0.0, 0.0, 600.0, 600.0]}),
             num_rows="dynamic", key="poly",
         )
 
+    # ---------------- reinforcement ----------------
     st.subheader("Reinforcement")
     if shape in ("Rectangular", "T-section"):
         c1, c2 = st.columns(2)
-        label_top = "Top bars (no.)" if shape == "Rectangular" else "Top bars in flange (no.)"
+        label_top = ("Top bars (no.)" if shape == "Rectangular"
+                     else "Top bars in flange (no.)")
         n_top = c1.number_input(label_top, 0, 30, 3)
         dia_top = c1.number_input("Top bar dia (mm)", 6, 40, 16)
         n_bot = c2.number_input("Bottom bars (no.)", 0, 30, 4)
@@ -94,6 +97,7 @@ with st.form("inputs"):
             num_rows="dynamic", key="bars",
         )
 
+    # ---------------- materials ----------------
     st.subheader("Materials")
     c1, c2 = st.columns(2)
     cls = c1.selectbox("Concrete class", list(CLASSES), index=5)
@@ -102,19 +106,31 @@ with st.form("inputs"):
     fyk = c2.number_input("fyk (MPa)", 200.0, 700.0, 500.0)
     gamma_s = c2.number_input("γs", 1.0, 1.5, 1.15)
     es = c2.number_input("Es (MPa)", 100e3, 250e3, 200e3)
-    eud = c2.number_input("Steel ultimate strain εud", 0.01, 0.1, 0.0225, format="%.4f")
+    eud = c2.number_input("Steel ultimate strain εud", 0.01, 0.1, 0.0225,
+                          format="%.4f")
 
+    # ---------------- actions ----------------
     st.subheader("Design actions")
     c1, c2 = st.columns(2)
     n_kn = c1.number_input("N_Ed (kN, compression +ve)", -5000.0, 50000.0, 0.0)
-    m_ed = c2.number_input("M_Ed (kNm)", 0.0, 50000.0, 150.0)
-    m_ser = st.number_input("Service moment M_ser (kNm)", 0.0, 50000.0, 100.0)
+    m_ed = c2.number_input("M_Ed (kNm, enter as positive)", 0.0, 50000.0, 150.0)
+    m_ser = st.number_input("Service moment M_ser (kNm, positive)",
+                            0.0, 50000.0, 100.0)
+    direction = st.radio(
+        "Bending direction for M_Ed / M_ser",
+        ["Sagging (compression at top)", "Hogging (compression at bottom)"],
+        horizontal=True,
+    )
 
     run = st.form_submit_button("Calculate")
 
 if run:
     p = ec2_concrete(CLASSES[cls], acc, gamma_c)
     fyd = fyk / gamma_s
+    sagging = direction.startswith("Sagging")
+    theta = 0.0 if sagging else math.pi
+    dir_txt = "sagging" if sagging else "hogging"
+    comp_face = "top" if sagging else "bottom"
 
     concrete = Concrete(
         name=cls, density=2.4e-6,
@@ -132,7 +148,7 @@ if run:
         colour="grey",
     )
 
-    # ---------- build geometry ----------
+    # ---------------- build geometry ----------------
     if shape == "Rectangular":
         geom = concrete_rectangular_section(
             d=h, b=b,
@@ -170,8 +186,8 @@ if run:
         geom = Geometry(geom=poly, material=concrete)
         for row in bars.itertuples(index=False):
             if row.dia <= 0 or not poly.contains(Point(row.x, row.y)):
-                st.error(f"Bar at ({row.x}, {row.y}) is outside the outline or "
-                         "has an invalid diameter.")
+                st.error(f"Bar at ({row.x}, {row.y}) is outside the outline "
+                         "or has an invalid diameter.")
                 st.stop()
             geom = add_bar(geom, area=area(row.dia), material=steel,
                            x=row.x, y=row.y, n=4)
@@ -179,42 +195,50 @@ if run:
     sec = ConcreteSection(geom)
     n_ed = n_kn * 1e3  # compression +ve
 
-    # cracked properties (sagging: compression at top), reused by tabs 4 and 5
-    cr = sec.calculate_cracked_properties(theta=0)
+    # Cracked properties for the chosen direction, reused by tabs 4 and 5
+    cr = sec.calculate_cracked_properties(theta=theta)
     cr.calculate_transformed_properties(elastic_modulus=p["ecm"])
 
     tab1, tab2, tab3, tab4, tab5 = st.tabs(
         ["Section", "Capacity", "M-N diagram", "Stiffness", "Stresses"]
     )
 
+    # ---------------- tab 1: section ----------------
     with tab1:
         st.pyplot(sec.plot_section(render=False).get_figure())
         st.caption(f"fcd = {p['fcd']:.1f} MPa, fyd = {fyd:.0f} MPa, "
                    f"λ = {p['lam']:.3f}, η = {p['eta']:.3f}, "
                    f"εcu3 = {p['ecu3']:.4f}, Ecm = {p['ecm']/1e3:.1f} GPa")
 
+    # ---------------- tab 2: capacity ----------------
     with tab2:
-        res = sec.ultimate_bending_capacity(theta=0, n=n_ed)
+        res = sec.ultimate_bending_capacity(theta=theta, n=n_ed)
         m_rd = abs(res.m_xy) / 1e6
         c1, c2, c3 = st.columns(3)
         c1.metric("M_Rd (kNm)", f"{m_rd:,.1f}")
         c2.metric("M_Ed (kNm)", f"{m_ed:,.1f}")
         c3.metric("Utilisation", f"{m_ed / m_rd:.2f}" if m_rd > 0 else "n/a")
+        st.caption(f"{dir_txt.capitalize()} bending, compression at {comp_face}.")
 
+    # ---------------- tab 3: M-N diagram, both directions ----------------
     with tab3:
-        mi = sec.moment_interaction_diagram(theta=0, progress_bar=False)
-        n_list, m_list = mi.get_results_lists(moment="m_x")
-        m_kn = [abs(m) / 1e6 for m in m_list]
-        n_plot = [n / 1e3 for n in n_list]       # compression +ve
         fig, ax = plt.subplots()
-        ax.plot(m_kn, n_plot, "-b", label="Design resistance")
-        ax.plot(m_ed, n_kn, "ro", label="(M_Ed, N_Ed)")
-        ax.set_xlabel("M (kNm)")
+        for th, sgn, lab, style in [(0.0, 1, "Sagging", "-b"),
+                                    (math.pi, -1, "Hogging", "-g")]:
+            mi = sec.moment_interaction_diagram(theta=th, progress_bar=False)
+            n_list, m_list = mi.get_results_lists(moment="m_x")
+            ax.plot([sgn * abs(m) / 1e6 for m in m_list],
+                    [n / 1e3 for n in n_list], style, label=lab)
+        applied_sign = 1 if sagging else -1
+        ax.plot(applied_sign * m_ed, n_kn, "ro", label="(M_Ed, N_Ed)")
+        ax.axvline(0, color="grey", lw=0.8)
+        ax.set_xlabel("M (kNm): sagging +ve, hogging -ve")
         ax.set_ylabel("N (kN), compression +ve")
         ax.grid(True)
         ax.legend()
         st.pyplot(fig)
 
+    # ---------------- tab 4: stiffness ----------------
     with tab4:
         tg = sec.get_transformed_gross_properties(elastic_modulus=p["ecm"])
         i_hom = tg.ixx_c
@@ -226,9 +250,11 @@ if run:
         c1, c2 = st.columns(2)
         c1.metric("M_cr (kNm)", f"{cr.m_cr / 1e6:,.1f}")
         c2.metric("Neutral axis depth, cracked (mm)", f"{cr.d_nc:,.0f}")
-        st.caption("Transformed to concrete using Ecm (short-term). Sagging "
-                   "bending, compression at top. Cracking uses fctm.")
+        st.caption(f"Transformed to concrete using Ecm (short-term). "
+                   f"{dir_txt.capitalize()} bending, compression at "
+                   f"{comp_face}. Cracking uses fctm.")
 
+    # ---------------- tab 5: stresses ----------------
     with tab5:
         sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_ser * 1e6)
         lo, hi = sres.get_concrete_stress_limits()
@@ -243,5 +269,5 @@ if run:
         c2.caption(f"EC2 7.2(5) limit 0.8·fyk = {0.8 * fyk:.0f} MPa → "
                    f"ratio {sig_s / (0.8 * fyk):.2f}")
         st.pyplot(sres.plot_stress(render=False).get_figure())
-        st.caption("Linear-elastic cracked section, sagging bending, "
+        st.caption(f"Linear-elastic cracked section, {dir_txt} bending, "
                    "short-term Ecm, bending only (axial load not included).")
