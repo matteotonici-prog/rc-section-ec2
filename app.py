@@ -223,12 +223,17 @@ if run:
     # ---------------- tab 3: M-N diagram, both directions ----------------
     with tab3:
         fig, ax = plt.subplots()
-        for th, sgn, lab, style in [(0.0, 1, "Sagging", "-b"),
-                                    (math.pi, -1, "Hogging", "-g")]:
-            mi = sec.moment_interaction_diagram(theta=th, progress_bar=False)
+        for th, lab, style in [(0.0, "Sagging", "-b"), (math.pi, "Hogging", "-g")]:
+            mi = sec.moment_interaction_diagram(
+                theta=th, n_points=48, progress_bar=False
+            )
             n_list, m_list = mi.get_results_lists(moment="m_x")
-            ax.plot([sgn * abs(m) / 1e6 for m in m_list],
-                    [n / 1e3 for n in n_list], style, label=lab)
+            ms = [m / 1e6 for m in m_list]          # keep the real sign
+            # make sagging plot on the +ve side and hogging on the -ve side,
+            # whatever sign convention the library returns for theta = pi
+            if (th == 0.0 and sum(ms) < 0) or (th != 0.0 and sum(ms) > 0):
+                ms = [-m for m in ms]
+            ax.plot(ms, [n / 1e3 for n in n_list], style, label=lab)
         applied_sign = 1 if sagging else -1
         ax.plot(applied_sign * m_ed, n_kn, "ro", label="(M_Ed, N_Ed)")
         ax.axvline(0, color="grey", lw=0.8)
