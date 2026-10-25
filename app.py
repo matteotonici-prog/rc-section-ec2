@@ -90,7 +90,9 @@ if run:
 
     n_ed = n_kn * 1e3  # compression +ve
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Section", "Capacity", "M-N diagram", "Stiffness"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Section", "Capacity", "M-N diagram", "Stiffness", "Stresses"]
+    )
 
     with tab1:
         st.pyplot(sec.plot_section(render=False).get_figure())
@@ -145,3 +147,24 @@ if run:
             "Transformed to concrete using Ecm (short-term). Sagging bending, "
             "compression at top. Cracking uses fctm."
         )
+
+    with tab5:
+        # Uses `cr` (cracked properties) calculated in the Stiffness tab
+        sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_ser * 1e6)
+
+        lo, hi = sres.get_concrete_stress_limits()
+        sig_c = max(abs(lo), abs(hi))
+        sig_s = max(abs(s) for s in sres.lumped_reinforcement_stresses)
+        fck = CLASSES[cls]
+
+        c1, c2 = st.columns(2)
+        c1.metric("Max concrete stress (MPa)", f"{sig_c:.1f}")
+        c1.caption(f"EC2 7.2(2) limit 0.6·fck = {0.6 * fck:.1f} MPa → "
+                   f"ratio {sig_c / (0.6 * fck):.2f}")
+        c2.metric("Max steel stress (MPa)", f"{sig_s:.0f}")
+        c2.caption(f"EC2 7.2(5) limit 0.8·fyk = {0.8 * fyk:.0f} MPa → "
+                   f"ratio {sig_s / (0.8 * fyk):.2f}")
+
+        st.pyplot(sres.plot_stress(render=False).get_figure())
+        st.caption("Linear-elastic cracked section, sagging bending, "
+                   "short-term Ecm, bending only (axial load not included).")
