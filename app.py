@@ -47,8 +47,16 @@ def area(dia):
     return math.pi * dia**2 / 4
 
 
-def show(fig):
-    st.pyplot(fig)
+PLOT_WIDTH = 0.5   # fraction of the page width used by each plot (1.0 = full width)
+
+
+def show(fig, width=PLOT_WIDTH):
+    if width >= 1.0:
+        st.pyplot(fig)
+    else:
+        col, _ = st.columns([width, 1 - width])
+        with col:
+            st.pyplot(fig)
     plt.close(fig)
 
 
