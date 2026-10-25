@@ -88,7 +88,7 @@ if run:
     )
     sec = ConcreteSection(geom)
 
-    n_ed = -n_kn * 1e3  # library: tension +ve, so compression is negative (verify)
+    n_ed = n_kn * 1e3  # compression +ve
 
     tab1, tab2, tab3 = st.tabs(["Section", "Capacity", "M-N diagram"])
 
@@ -108,8 +108,9 @@ if run:
 
     with tab3:
         mi = sec.moment_interaction_diagram(theta=0, progress_bar=False)
-        m_kn = [abs(m) / 1e6 for m in mi.m_xy]
-        n_plot = [-n / 1e3 for n in mi.n]       # plot compression positive
+        n_list, m_list = mi.get_results_lists(moment="m_x")
+        m_kn = [abs(m) / 1e6 for m in m_list]
+        n_plot = [n / 1e3 for n in n_list]       # compression +ve
         fig, ax = plt.subplots()
         ax.plot(m_kn, n_plot, "-b", label="Design resistance")
         ax.plot(m_ed, n_kn, "ro", label="(M_Ed, N_Ed)")
