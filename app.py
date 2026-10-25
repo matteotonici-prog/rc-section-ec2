@@ -90,7 +90,7 @@ if run:
 
     n_ed = n_kn * 1e3  # compression +ve
 
-    tab1, tab2, tab3 = st.tabs(["Section", "Capacity", "M-N diagram"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Section", "Capacity", "M-N diagram", "Stiffness"])
 
     with tab1:
         st.pyplot(sec.plot_section(render=False).get_figure())
@@ -119,3 +119,29 @@ if run:
         ax.grid(True)
         ax.legend()
         st.pyplot(fig)
+
+    with tab4:
+        # Homogeneous (transformed, uncracked) properties, referenced to Ecm
+        tg = sec.get_transformed_gross_properties(elastic_modulus=p["ecm"])
+        # Cracked properties for sagging bending (compression at top)
+        cr = sec.calculate_cracked_properties(theta=0)
+        cr.calculate_transformed_properties(elastic_modulus=p["ecm"])
+
+        i_conc = b * h**3 / 12        # plain concrete rectangle, no steel
+        i_hom = tg.ixx_c              # homogeneous section, uncracked
+        i_cr = cr.iuu_cr              # cracked section
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("I concrete only (×10⁹ mm⁴)", f"{i_conc / 1e9:.3f}")
+        c2.metric("I homogeneous (×10⁹ mm⁴)", f"{i_hom / 1e9:.3f}")
+        c3.metric("I cracked (×10⁹ mm⁴)", f"{i_cr / 1e9:.3f}")
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("I cracked / I homogeneous", f"{i_cr / i_hom:.2f}")
+        c2.metric("M_cr (kNm)", f"{cr.m_cr / 1e6:,.1f}")
+        c3.metric("Neutral axis depth, cracked (mm)", f"{cr.d_nc:,.0f}")
+
+        st.caption(
+            "Transformed to concrete using Ecm (short-term). Sagging bending, "
+            "compression at top. Cracking uses fctm."
+        )
