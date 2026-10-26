@@ -6,15 +6,16 @@ from matplotlib.patches import Circle
 from shapely.geometry import Polygon, Point
 from concreteproperties import Concrete, ConcreteSection, SteelBar
 from concreteproperties.stress_strain_profile import (
-    BilinearStressStrain, ConcreteLinear, EurocodeParabolicUltimate,
-    RectangularStressBlock, SteelElasticPlastic, SteelHardening,
+    BilinearStressStrain, ConcreteLinear, ConcreteLinearNoTension,
+    EurocodeParabolicUltimate, RectangularStressBlock, SteelElasticPlastic,
+    SteelHardening,
 )
 from sectionproperties.pre.geometry import Geometry
 from sectionproperties.pre.library import concrete_circular_section
 from sectionproperties.pre.library.concrete_sections import add_bars
 
 MAX_LAYERS = 50
-PLOT_WIDTH = 0.8   # fraction of the page width used by each plot (1.0 = full width)
+PLOT_WIDTH = 0.75   # fraction of the page width used by each plot (1.0 = full width)
 
 CLASSES = {"C20/25": 20, "C25/30": 25, "C30/37": 30, "C32/40": 32, "C35/45": 35,
            "C40/50": 40, "C45/55": 45, "C50/60": 50, "C55/67": 55, "C60/75": 60,
@@ -226,7 +227,7 @@ with st.form("inputs"):
                "εuk ≥ 5%. Class C: k = 1.15 to 1.35, εuk ≥ 7.5%. "
                "EC2 recommends εud = 0.9·εuk.")
 
-    # ---------------- stiffness basis ----------------
+    # ---------------- stiffness / service basis ----------------
     st.subheader("Stiffness and service stresses")
     c1, c2 = st.columns(2)
     basis = c1.radio(
@@ -235,6 +236,11 @@ with st.form("inputs"):
     )
     n_long = c2.number_input("Long-term modular ratio n = Es / Ec,eff",
                              5.0, 30.0, 15.0)
+    crack_basis = st.radio(
+        "Tensile strength for the cracking check, fct,eff",
+        ["fctm", "fctm,fl = max((1.6 - h/1000)·fctm, fctm)"],
+        horizontal=True,
+    )
 
     # ---------------- actions ----------------
     st.subheader("Actions")
@@ -284,13 +290,6 @@ if run:
             ultimate_strain=p["ecu"],
         )
 
-    concrete = Concrete(
-        name=cls, density=2.4e-6,
-        stress_strain_profile=ConcreteLinear(elastic_modulus=e_service),
-        ultimate_stress_strain_profile=ult_profile,
-        flexural_tensile_strength=p["fctm"], colour="lightgrey",
-    )
-
     # ---------------- steel profile ----------------
     if steel_model.startswith("Elastic"):
         steel_profile = SteelElasticPlastic(
@@ -305,18 +304,13 @@ if run:
         stress_strain_profile=steel_profile, colour="grey",
     )
 
-    # ---------------- build geometry ----------------
+    # ---------------- geometry data (validated once) ----------------
     layer_note = ""
     if shape == "Circular":
-        geom = concrete_circular_section(
-            d=diam, area_conc=area(diam), n_conc=64,
-            dia_bar=dia_bar, area_bar=area(dia_bar), n_bar=n_bar, cover=cover,
-            n_circle=4, conc_mat=concrete, steel_mat=steel,
-        )
+        h_depth = diam
         n_bars_total = int(n_bar)
         as_total = n_bar * area(dia_bar)
     else:
-        # 1) concrete outline
         if shape == "Rectangular":
             poly = Polygon([(0, 0), (b, 0), (b, h), (0, h)])
         elif shape == "T-section":
@@ -335,8 +329,7 @@ if run:
                          "cross itself.")
                 st.stop()
 
-        # 2) list of bars (x, y, dia, label)
-        bar_list = []
+        bar_list = []   # (x, y, dia, label)
         if shape == "Custom (coordinates)":
             for k, r in enumerate(bar_df.dropna().itertuples(index=False), 1):
                 bar_list.append((float(r.x), float(r.y), float(r.dia), f"Bar {k}"))
@@ -386,23 +379,48 @@ if run:
             st.error(msg)
             st.stop()
 
-        # 3) concrete + bars (one operation per bar diameter)
-        geom = Geometry(geom=poly, material=concrete)
         by_dia = {}
         for x, y, d, _ in bar_list:
             by_dia.setdefault(d, ([], []))
             by_dia[d][0].append(x)
             by_dia[d][1].append(y)
-        for d, (xs, ys) in by_dia.items():
-            geom = add_bars(geom, area=area(d), material=steel,
-                            x=xs, y=ys, n=4)
+        h_depth = poly.bounds[3] - poly.bounds[1]
         n_bars_total = len(bar_list)
         as_total = sum(area(d) for _, _, d, _ in bar_list)
+
+    # Tensile strength used to decide whether the section is cracked at service
+    if crack_basis.startswith("fctm,fl"):
+        fct_eff = max((1.6 - h_depth / 1000) * p["fctm"], p["fctm"])
+    else:
+        fct_eff = p["fctm"]
+
+    # ---------------- section factory ----------------
+    def make_section(service_profile):
+        """Same geometry, with the chosen concrete service stress-strain profile."""
+        conc = Concrete(
+            name=cls, density=2.4e-6,
+            stress_strain_profile=service_profile,
+            ultimate_stress_strain_profile=ult_profile,
+            flexural_tensile_strength=p["fctm"], colour="lightgrey",
+        )
+        if shape == "Circular":
+            g = concrete_circular_section(
+                d=diam, area_conc=area(diam), n_conc=64,
+                dia_bar=dia_bar, area_bar=area(dia_bar), n_bar=n_bar,
+                cover=cover, n_circle=4, conc_mat=conc, steel_mat=steel,
+            )
+        else:
+            g = Geometry(geom=poly, material=conc)
+            for d, (xs, ys) in by_dia.items():
+                g = add_bars(g, area=area(d), material=steel,
+                             x=xs, y=ys, n=4)
+        return ConcreteSection(g)
 
     st.caption(f"Reinforcement: {n_bars_total} bars{layer_note}, "
                f"total As = {as_total:,.0f} mm²")
 
-    sec = ConcreteSection(geom)
+    # Main section: concrete carries tension (uncracked behaviour in service)
+    sec = make_section(ConcreteLinear(elastic_modulus=e_service))
     n_ed = n_kn * 1e3  # compression +ve
 
     # Elastic cracked properties (bending only), used by the stiffness tab
@@ -441,45 +459,72 @@ if run:
                    f"bending, compression at {comp_face}. Cracked properties "
                    "are for bending only (no axial force). Cracking uses fctm.")
 
-    # ---------------- tab 3: service stresses (with axial force) ----------------
+    # ---------------- tab 3: service stresses (cracking + axial force) ----------------
     with tab3:
         st.markdown(f"**{basis_txt} basis**: Ec = {e_service / 1e3:.1f} GPa "
                     f"(n = {es / e_service:.1f}), M_ser = {m_ser:,.0f} kNm, "
                     f"N_ser = {n_ser:,.0f} kN, {dir_txt}")
+        n_s, m_s = n_ser * 1e3, m_ser * 1e6
+        t_unc = None
         with st.spinner("Running service analysis..."):
             try:
-                mk = sec.moment_curvature_analysis(
-                    theta=theta, n=n_ser * 1e3, progress_bar=False
-                )
-                sres = sec.calculate_service_stress(
-                    moment_curvature_results=mk, m=m_ser * 1e6
-                )
-                method = ("Moment-curvature analysis including N_ser "
-                          "(cracking taken into account)")
+                # 1) uncracked analysis: concrete carries tension
+                mk_u = sec.moment_curvature_analysis(
+                    theta=theta, n=n_s, progress_bar=False)
+                s_unc = sec.calculate_service_stress(
+                    moment_curvature_results=mk_u, m=m_s)
+                lo_u, _ = s_unc.get_concrete_stress_limits()
+                t_unc = max(0.0, -lo_u)       # tension is negative
+
+                if t_unc <= fct_eff:
+                    sres, state = s_unc, "UNCRACKED"
+                    method = ("Uncracked section (concrete carries tension), "
+                              "including N_ser")
+                else:
+                    # 2) cracked analysis: concrete resists no tension
+                    sec_cr = make_section(
+                        ConcreteLinearNoTension(elastic_modulus=e_service))
+                    mk_c = sec_cr.moment_curvature_analysis(
+                        theta=theta, n=n_s, progress_bar=False)
+                    sres = sec_cr.calculate_service_stress(
+                        moment_curvature_results=mk_c, m=m_s)
+                    state = "CRACKED"
+                    method = ("Cracked section (concrete resists no tension), "
+                              "including N_ser")
             except Exception as exc:
                 st.warning(f"The service analysis with axial force failed "
                            f"({exc}). Showing the elastic cracked bending-only "
                            "result instead; N_ser is NOT included.")
-                sres = sec.calculate_cracked_stress(
-                    cracked_results=cr, m=m_ser * 1e6
-                )
+                sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_s)
+                state = "CRACKED (assumed)"
                 method = "Elastic cracked section, bending only (N_ser ignored)"
 
+        if t_unc is not None:
+            st.markdown(
+                f"**Section state at service: {state}.** Largest concrete "
+                f"tension in the uncracked analysis = {t_unc:.2f} MPa, "
+                f"fct,eff = {fct_eff:.2f} MPa."
+            )
+        else:
+            st.markdown(f"**Section state at service: {state}.**")
+
         lo, hi = sres.get_concrete_stress_limits()
-        sig_c = max(abs(lo), abs(hi))
+        sig_c = max(hi, 0.0)               # compression is positive
+        t_conc = max(-lo, 0.0)
         df_ser = bar_stress_table(sres)
         worst = df_ser.loc[df_ser["Stress (MPa)"].abs().idxmax()]
         sig_s = abs(float(worst["Stress (MPa)"]))
         fck = CLASSES[cls]
 
-        c1, c2 = st.columns(2)
-        c1.metric("Max concrete stress (MPa)", f"{sig_c:.1f}")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Max concrete compression (MPa)", f"{sig_c:.1f}")
         c1.caption(f"EC2 7.2(2): 0.6·fck = {0.6 * fck:.1f} MPa "
                    f"(ratio {sig_c / (0.6 * fck):.2f}), characteristic. "
                    f"EC2 7.2(3): 0.45·fck = {0.45 * fck:.1f} MPa "
                    f"(ratio {sig_c / (0.45 * fck):.2f}), quasi-permanent.")
-        c2.metric("Max steel stress (MPa)", f"{sig_s:.0f}")
-        c2.caption(f"Bar {int(worst['Bar'])}. EC2 7.2(5): 0.8·fyk = "
+        c2.metric("Max concrete tension (MPa)", f"{t_conc:.2f}")
+        c3.metric("Max steel stress (MPa)", f"{sig_s:.0f}")
+        c3.caption(f"Bar {int(worst['Bar'])}. EC2 7.2(5): 0.8·fyk = "
                    f"{0.8 * fyk:.0f} MPa (ratio {sig_s / (0.8 * fyk):.2f}).")
 
         show(sres.plot_stress(render=False).get_figure())
