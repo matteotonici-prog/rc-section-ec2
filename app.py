@@ -734,7 +734,7 @@ if run and geom_ok:
             c2.metric("I cracked (×10⁹ mm⁴)", f"{i_cr / 1e9:.3f}")
             c3.metric("I cracked / I homogeneous", f"{i_cr / i_hom:.2f}")
             st.caption(f"I homogeneous= Reinforcement transformed to concrete and full section is calculated as uncracked, " 
-            I Cracked= Reinforcement transformed to concrete, section is considered cracked.")
+                         I Cracked= Reinforcement transformed to concrete, section is considered cracked.")
             c1, c2 = st.columns(2)
             c1.metric("EI homogeneous (kNm²)", f"{e_service * i_hom * 1e-9:,.0f}")
             c2.metric("EI cracked (kNm²)", f"{e_service * i_cr * 1e-9:,.0f}")
