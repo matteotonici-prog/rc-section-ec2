@@ -1275,15 +1275,15 @@ if run and geom_ok:
             show(
                 plot_bar_stresses(
                     sec,
-                    df_uls,
-                    "Reinforcement stresses at ULS",
-                    fig_width=4.5,
-                    fig_height=3.5,
-                    annotation_font=5,
-                    axis_font=7,
-                    title_font=8,
+                    df_ser,
+                    "Reinforcement stresses (service)",
+                    fig_width=12,
+                    fig_height=12,
+                    annotation_font=18,
+                    axis_font=18,
+                    title_font=18,
                 ),
-                width=0.60,
+                width=1,
             )
             st.dataframe(df_uls.round(1), hide_index=True)
             st.caption("The stresses shown are those of the section at its "
