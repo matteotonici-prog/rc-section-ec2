@@ -277,24 +277,119 @@ def bar_stress_table(sres):
     return pd.DataFrame(rows)
 
 
-def plot_bar_stresses(sec, df, title):
-    """Section outline with every bar drawn to scale, coloured and labelled by stress."""
+def plot_bar_stresses(
+    sec,
+    df,
+    title,
+    fig_width=4.5,
+    fig_height=3.5,
+    annotation_font=5,
+    axis_font=7,
+    title_font=8,
+):
+    """
+    Draws the reinforcement bars to scale and colours them according
+    to their calculated stress.
+
+    Positive stress = compression.
+    Negative stress = tension.
+    """
+
     ax = sec.plot_section(render=False)
     fig = ax.get_figure()
-    vmax = max(float(df["Stress (MPa)"].abs().max()), 1e-6)
+
+    # Smaller Matplotlib figure
+    fig.set_size_inches(fig_width, fig_height)
+
+    if df.empty:
+        ax.set_title(title, fontsize=title_font)
+        return fig
+
+    vmax = max(
+        float(df["Stress (MPa)"].abs().max()),
+        1e-6,
+    )
+
     norm = plt.Normalize(-vmax, vmax)
     cmap = plt.cm.bwr
+
     for _, r in df.iterrows():
-        ax.add_patch(Circle((r["x (mm)"], r["y (mm)"]), r["Dia (mm)"] / 2,
-                            facecolor=cmap(norm(r["Stress (MPa)"])),
-                            edgecolor="k", zorder=5))
-        ax.annotate(f'{int(r["Bar"])}: {r["Stress (MPa)"]:.0f}',
-                    (r["x (mm)"], r["y (mm)"]), xytext=(0, 12),
-                    textcoords="offset points", ha="center", fontsize=7,
-                    zorder=6)
-    sm = plt.cm.ScalarMappable(norm=norm, cmap=cmap)
-    fig.colorbar(sm, ax=ax, label="Bar stress (MPa), +ve compression")
-    ax.set_title(title)
+        stress = float(r["Stress (MPa)"])
+        bar_number = int(r["Bar"])
+
+        ax.add_patch(
+            Circle(
+                (r["x (mm)"], r["y (mm)"]),
+                r["Dia (mm)"] / 2,
+                facecolor=cmap(norm(stress)),
+                edgecolor="black",
+                linewidth=0.4,
+                zorder=5,
+            )
+        )
+
+        ax.annotate(
+            f"{bar_number}: {stress:.0f}",
+            (r["x (mm)"], r["y (mm)"]),
+            xytext=(0, 7),
+            textcoords="offset points",
+            ha="center",
+            va="bottom",
+            fontsize=annotation_font,
+            zorder=6,
+        )
+
+    sm = plt.cm.ScalarMappable(
+        norm=norm,
+        cmap=cmap,
+    )
+    sm.set_array([])
+
+    colour_bar = fig.colorbar(
+        sm,
+        ax=ax,
+        fraction=0.035,
+        pad=0.03,
+    )
+
+    colour_bar.set_label(
+        "Bar stress (MPa), +ve compression",
+        fontsize=axis_font,
+    )
+
+    colour_bar.ax.tick_params(
+        labelsize=max(axis_font - 1, 1),
+    )
+
+    ax.set_title(
+        title,
+        fontsize=title_font,
+    )
+
+    ax.set_xlabel(
+        "x (mm)",
+        fontsize=axis_font,
+    )
+
+    ax.set_ylabel(
+        "y (mm)",
+        fontsize=axis_font,
+    )
+
+    ax.tick_params(
+        axis="both",
+        labelsize=max(axis_font - 1, 1),
+    )
+
+    ax.set_aspect(
+        "equal",
+        adjustable="datalim",
+    )
+
+    ax.margins(0.08)
+
+    fig.tight_layout()
+
     return fig
 
 
@@ -1141,11 +1236,19 @@ if run and geom_ok:
             c3.caption(f"Bar {int(worst['Bar'])}. EC2 7.2(5): 0.8·fyk = "
                        f"{0.8 * fyk:.0f} MPa (ratio {sig_s / (0.8 * fyk):.2f}).")
             show(sres.plot_stress(render=False).get_figure())
-            show(plot_bar_stresses(sec, df_ser, "Reinforcement stresses (service)"))
-            st.dataframe(df_ser.round(1), hide_index=True)
-            st.caption(f"Method: {method}. Compression is positive, so bars in "
-                       "tension show negative stress. M and N are taken about the "
-                       "gross centroid of the section.")
+            show(
+                plot_bar_stresses(
+                    sec,
+                    df_ser,
+                    "Reinforcement stresses (service)",
+                    fig_width=4.5,
+                    fig_height=3.5,
+                    annotation_font=5,
+                    axis_font=7,
+                    title_font=8,
+                ),
+                width=0.60,
+            )
 
     # ---------------- tab 4: ULS capacity ----------------
     with tab4:
@@ -1169,7 +1272,19 @@ if run and geom_ok:
             st.subheader("Stresses at the ultimate limit state")
             show(uls.plot_stress(render=False).get_figure())
             df_uls = bar_stress_table(uls)
-            show(plot_bar_stresses(sec, df_uls, "Reinforcement stresses at ULS"))
+            show(
+                plot_bar_stresses(
+                    sec,
+                    df_uls,
+                    "Reinforcement stresses at ULS",
+                    fig_width=4.5,
+                    fig_height=3.5,
+                    annotation_font=5,
+                    axis_font=7,
+                    title_font=8,
+                ),
+                width=0.60,
+            )
             st.dataframe(df_uls.round(1), hide_index=True)
             st.caption("The stresses shown are those of the section at its "
                        "ultimate capacity M_Rd for the applied axial force, not "
