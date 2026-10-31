@@ -436,7 +436,7 @@ def ec2_crack(df, poly, sagging, es, ecm, fct_eff, kt, k1, k3, k4, to_face):
         inband = ten[ten["dist"] <= ten["dist"].min() + 1e-6]
     rho = float(inband["area"].sum() / ac_eff)
     phi_eq = float((inband["Dia (mm)"] ** 2).sum() / inband["Dia (mm)"].sum())
-    alpha_e = es / ecm
+    alpha_e = {es / e_service:.1f})
 
     ten = ten.assign(layer=ten["y (mm)"].round(0))
     rows = []
