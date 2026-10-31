@@ -383,7 +383,7 @@ st.subheader("Geometry (mm)")
 if shape == "Rectangular":
     c1, c2 = st.columns(2)
     b = c1.number_input("Width b", 100.0, 3000.0, 300.0, key="rect_b")
-    h = c2.number_input("Overall depth h", 100.0, 3000.0, 600.0, key="rect_h")
+    h = c2.number_input("Overall depth h", 100.0, 3000.0, 500.0, key="rect_h")
 elif shape == "T-section":
     c1, c2 = st.columns(2)
     b = c1.number_input("Web width b", 100.0, 3000.0, 300.0, key="tee_b")
@@ -392,8 +392,8 @@ elif shape == "T-section":
     hf = c2.number_input("Flange depth hf", 50.0, 1000.0, 150.0, key="tee_hf")
 elif shape == "Rectangular wall":
     c1, c2 = st.columns(2)
-    t_w = c1.number_input("Wall thickness t", 100.0, 1500.0, 300.0, key="wall_t")
-    l_w = c2.number_input("Wall length L", 500.0, 20000.0, 5000.0, key="wall_l")
+    t_w = c1.number_input("Wall thickness t", 100.0, 1500.0, 200.0, key="wall_t")
+    l_w = c2.number_input("Wall length L", 500.0, 20000.0, 2000.0, key="wall_l")
     orient = st.radio(
         "Wall orientation in the section",
         ["In-plane: length vertical (bending about the strong axis)",
