@@ -720,8 +720,8 @@ if run and geom_ok:
                    f"λ = {p['lam']:.3f}, η = {p['eta']:.3f}, "
                    f"εcu3 = {p['ecu']:.4f}, Ecm = {p['ecm']/1e3:.1f} GPa")
 
- # ---------------- tab 2: stiffness ----------------
-with tab2:
+    # ---------------- tab 2: stiffness ----------------
+    with tab2:
 
     # Gross transformed section properties.
     # Concrete is active in both compression and tension.
