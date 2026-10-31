@@ -731,7 +731,11 @@ if run and geom_ok:
                         f"modular ratio n = Es/Ec = {es / e_service:.1f}")
             c1, c2, c3 = st.columns(3)
             c1.metric("I homogeneous (×10⁹ mm⁴)", f"{i_hom / 1e9:.3f}")
-            st.caption(f"I homogeneous= Reinforcement transformed to concrete and section is calculated as uncracked, . {dir_txt.capitalize()} ")
+            
+            st.caption(f"I homogeneous= Reinforcement transformed to concrete and full section is calculated as uncracked, 
+            I Cracked= Reinforcement transformed to concrete, section is considered cracked ")
+
+            
             c2.metric("I cracked (×10⁹ mm⁴)", f"{i_cr / 1e9:.3f}")
             c3.metric("I cracked / I homogeneous", f"{i_cr / i_hom:.2f}")
             c1, c2 = st.columns(2)
