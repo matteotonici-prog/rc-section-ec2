@@ -1091,7 +1091,7 @@ if run and geom_ok:
                 )
     
                 # -------------------------------------------------
-                # Determine zero-strain axis from reinforcement strain
+                # Determine neutral axis (zero-strain axis) from reinforcement strain
                 # -------------------------------------------------
                 try:
                     s_eff = sec_eff.calculate_service_stress(
@@ -1110,7 +1110,7 @@ if run and geom_ok:
     
                     if y_range <= 1e-6:
                         st.caption(
-                            "The service zero-strain axis cannot be determined "
+                            "The service neutral axis (zero-strain axis) cannot be determined "
                             "because all reinforcement bars are at the same "
                             "vertical level."
                         )
@@ -1124,7 +1124,7 @@ if run and geom_ok:
     
                         if abs(strain_slope) <= 1e-16:
                             st.caption(
-                                "The service zero-strain axis cannot be determined "
+                                "The service neutral axis (zero-strain axis) cannot be determined "
                                 "because the fitted strain gradient is too small."
                             )
     
@@ -1147,7 +1147,7 @@ if run and geom_ok:
     
                             if y_na_eff < y_bottom or y_na_eff > y_top:
                                 st.caption(
-                                    "The zero-strain axis lies outside the concrete "
+                                    "The neutral axis (zero-strain axis) lies outside the concrete "
                                     "section. This can occur when axial compression "
                                     "or tension causes the entire section to have "
                                     "the same strain sign."
@@ -1164,7 +1164,7 @@ if run and geom_ok:
                 except Exception as na_exc:
                     st.caption(
                         "The effective stiffness was calculated, but the service "
-                        "zero-strain axis could not be extracted: "
+                        "neutral axis (zero-strain axis) could not be extracted: "
                         f"{na_exc!r}"
                     )
     
@@ -1243,11 +1243,11 @@ if run and geom_ok:
                     "Reinforcement stresses (service)",
                     fig_width=10,
                     fig_height=5,
-                    annotation_font=5,
+                    annotation_font=6,
                     axis_font=7,
                     title_font=8,
                 ),
-                width=0.60,
+                width=0.1,
             )
 
     # ---------------- tab 4: ULS capacity ----------------
