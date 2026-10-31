@@ -15,7 +15,7 @@ from sectionproperties.pre.library import concrete_circular_section
 from sectionproperties.pre.library.concrete_sections import add_bars
 
 MAX_LAYERS = 50
-PLOT_WIDTH = 0.5   # fraction of the page width used by each plot (1.0 = full width)
+PLOT_WIDTH = 0.8   # fraction of the page width used by each plot (1.0 = full width)
 
 CLASSES = {"C20/25": 20, "C25/30": 25, "C30/37": 30, "C32/40": 32, "C35/45": 35,
            "C40/50": 40, "C45/55": 45, "C50/60": 50, "C55/67": 55, "C60/75": 60,
