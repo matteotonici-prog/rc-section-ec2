@@ -560,7 +560,7 @@ for e in errors:
 if poly is not None and bars:
     show(plot_preview(poly, bars,
                       f"{shape}: {n_bars_total} bars, As = {as_total:,.0f} mm²"),
-         width=0.5)
+         width=1)
 if rows:
     st.dataframe(pd.DataFrame(rows), hide_index=True)
     if any(r["Status"].startswith("⚠️") for r in rows):
