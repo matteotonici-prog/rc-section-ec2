@@ -415,7 +415,7 @@ else:
 st.subheader("Reinforcement")
 if shape != "Custom (coordinates)":
     c1, c2, c3 = st.columns(3)
-    c_nom = c1.number_input("Nominal cover to links (mm)", 10.0, 100.0, 35.0, key="c_nom")
+    c_nom = c1.number_input("Nominal cover to links (mm)", 10.0, 100.0, 30.0, key="c_nom")
     link = c2.number_input("Link / horizontal bar dia (mm)", 0.0, 25.0, 10.0, key="link")
     dg = c3.number_input("Max aggregate size dg (mm)", 8.0, 40.0, 20.0, key="dg")
     cover_tot = c_nom + link          # cover to the surface of the longitudinal bars
