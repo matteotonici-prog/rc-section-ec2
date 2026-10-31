@@ -720,34 +720,378 @@ if run and geom_ok:
                    f"λ = {p['lam']:.3f}, η = {p['eta']:.3f}, "
                    f"εcu3 = {p['ecu']:.4f}, Ecm = {p['ecm']/1e3:.1f} GPa")
 
-    # ---------------- tab 2: stiffness ----------------
-    with tab2:
-        if cr is None:
-            st.info("Cracked properties are not available for this case.")
-        else:
-            tg = sec.get_transformed_gross_properties(elastic_modulus=e_service)
-            i_hom, i_cr = tg.ixx_c, cr.iuu_cr
-            st.markdown(f"**{basis_txt} stiffness**: Ec = {e_service / 1e3:.1f} GPa, "
-                        f"modular ratio n = Es/Ec = {es / e_service:.1f}")
+ # ---------------- tab 2: stiffness ----------------
+with tab2:
+
+    # Gross transformed section properties.
+    # Concrete is active in both compression and tension.
+    tg = sec.get_transformed_gross_properties(
+        elastic_modulus=e_service
+    )
+
+    i_hom = float(tg.ixx_c)
+    ei_hom = e_service * i_hom
+
+    st.markdown(
+        f"**{basis_txt} stiffness basis**: "
+        f"Ec = {e_service / 1e3:.1f} GPa, "
+        f"modular ratio n = Es/Ec = {es / e_service:.1f}"
+    )
+
+    # ---------------------------------------------------------
+    # Standard transformed-section properties
+    # ---------------------------------------------------------
+    st.subheader("Transformed-section properties")
+
+    if cr is None:
+        c1, c2 = st.columns(2)
+
+        c1.metric(
+            "I homogeneous (x10^9 mm4)",
+            f"{i_hom / 1e9:.3f}"
+        )
+
+        c2.metric(
+            "EI homogeneous (kNm2)",
+            f"{ei_hom * 1e-9:,.0f}"
+        )
+
+        st.info(
+            "The fully cracked pure-bending properties are not "
+            "available for this section."
+        )
+
+    else:
+        i_cr = float(cr.iuu_cr)
+        ei_cr = e_service * i_cr
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "I homogeneous (x10^9 mm4)",
+            f"{i_hom / 1e9:.3f}"
+        )
+
+        c2.metric(
+            "I cracked, pure bending (x10^9 mm4)",
+            f"{i_cr / 1e9:.3f}"
+        )
+
+        c3.metric(
+            "Icr / Ihom",
+            f"{i_cr / i_hom:.3f}"
+        )
+
+        c1, c2, c3 = st.columns(3)
+
+        c1.metric(
+            "EI homogeneous (kNm2)",
+            f"{ei_hom * 1e-9:,.0f}"
+        )
+
+        c2.metric(
+            "EI cracked, pure bending (kNm2)",
+            f"{ei_cr * 1e-9:,.0f}"
+        )
+
+        c3.metric(
+            "Mcr (kNm)",
+            f"{cr.m_cr / 1e6:,.1f}"
+        )
+
+        st.metric(
+            "Neutral-axis depth, fully cracked pure bending (mm)",
+            f"{cr.d_nc:,.1f}"
+        )
+
+        st.caption(
+            "I homogeneous is calculated with the reinforcement "
+            "transformed to concrete and the complete concrete section active. "
+            "I cracked is the fully cracked transformed-section property for "
+            f"{dir_txt} pure bending. Concrete in tension is ignored. "
+            "The pure-bending cracked property does not include axial force."
+        )
+
+    # ---------------------------------------------------------
+    # Load-dependent service stiffness
+    # ---------------------------------------------------------
+    st.divider()
+    st.subheader("Effective stiffness at the entered service load")
+
+    n_s_eff = n_ser * 1e3
+    m_s_eff = m_ser * 1e6
+
+    st.caption(
+        f"Service load used: Nser = {n_ser:,.1f} kN compression-positive, "
+        f"Mser = {m_ser:,.1f} kNm, {dir_txt} bending."
+    )
+
+    try:
+        # First determine whether the section is cracked at the entered
+        # service load. This uses concrete with tensile stiffness.
+        mk_unc_eff = sec.moment_curvature_analysis(
+            theta=theta,
+            n=n_s_eff,
+            progress_bar=False
+        )
+
+        s_unc_eff = sec.calculate_service_stress(
+            moment_curvature_results=mk_unc_eff,
+            m=m_s_eff
+        )
+
+        lo_unc_eff, _ = s_unc_eff.get_concrete_stress_limits()
+        concrete_tension_eff = max(0.0, -float(lo_unc_eff))
+
+        service_is_cracked = concrete_tension_eff > fct_eff
+
+        if abs(m_s_eff) <= 1e-9:
+            st.info(
+                "Mser is zero, so a secant bending stiffness M/kappa "
+                "cannot be calculated."
+            )
+
+            c1, c2 = st.columns(2)
+
+            c1.metric(
+                "Concrete tension from uncracked analysis (MPa)",
+                f"{concrete_tension_eff:.3f}"
+            )
+
+            c2.metric(
+                "fct,eff (MPa)",
+                f"{fct_eff:.3f}"
+            )
+
+        elif not service_is_cracked:
+            # For the linear uncracked model, the effective bending
+            # inertia is the transformed homogeneous inertia.
+            i_eff = i_hom
+            ei_eff = ei_hom
+
             c1, c2, c3 = st.columns(3)
-            c1.metric("I homogeneous (×10⁹ mm⁴)", f"{i_hom / 1e9:.3f}")
-            c2.metric("I cracked (×10⁹ mm⁴)", f"{i_cr / 1e9:.3f}")
-            c3.metric("I cracked / I homogeneous", f"{i_cr / i_hom:.2f}")
-            st.caption(
-                        "I homogeneous = Reinforcement transformed to concrete and the full section "
-                        "is considered uncracked.\n\n"
-                        "I cracked = Reinforcement transformed to concrete and the section "
-                        "is considered cracked."
+
+            c1.metric(
+                "I effective @ service (x10^9 mm4)",
+                f"{i_eff / 1e9:.3f}"
+            )
+
+            c2.metric(
+                "EI effective @ service (kNm2)",
+                f"{ei_eff * 1e-9:,.0f}"
+            )
+
+            c3.metric(
+                "Ieff / Ihom",
+                f"{i_eff / i_hom:.3f}"
+            )
+
+            c1, c2 = st.columns(2)
+
+            c1.metric(
+                "Concrete tension (MPa)",
+                f"{concrete_tension_eff:.3f}"
+            )
+
+            c2.metric(
+                "fct,eff (MPa)",
+                f"{fct_eff:.3f}"
+            )
+
+            st.success(
+                "The section is uncracked at the entered service load. "
+                "Therefore Ieff = Ihom for the selected linear-elastic model."
+            )
+
+        else:
+            # Re-run with no concrete tensile resistance.
+            sec_eff = make_section(
+                ConcreteLinearNoTension(
+                    elastic_modulus=e_service
+                )
+            )
+
+            mk_eff = sec_eff.moment_curvature_analysis(
+                theta=theta,
+                n=n_s_eff,
+                progress_bar=False
+            )
+
+            moments_eff = np.asarray(mk_eff.m_xy, dtype=float)
+
+            if moments_eff.size == 0:
+                raise ValueError(
+                    "The moment-curvature analysis returned no results."
+                )
+
+            m_min = float(np.min(moments_eff))
+            m_max = float(np.max(moments_eff))
+
+            if m_s_eff < m_min - 1e-6 or m_s_eff > m_max + 1e-6:
+                raise ValueError(
+                    f"Mser = {m_ser:,.1f} kNm is outside the generated "
+                    f"moment-curvature range of "
+                    f"{m_min / 1e6:,.1f} to {m_max / 1e6:,.1f} kNm."
+                )
+
+            # Use the library interpolation method instead of selecting
+            # the nearest analysis point.
+            kappa_eff = float(
+                mk_eff.get_curvature(moment=m_s_eff)
+            )
+
+            if not np.isfinite(kappa_eff):
+                raise ValueError(
+                    "The interpolated service curvature is not finite."
+                )
+
+            if abs(kappa_eff) <= 1e-16:
+                raise ValueError(
+                    "The calculated service curvature is too close to zero "
+                    "to determine M/kappa."
+                )
+
+            # Secant stiffness at the entered service load:
+            #
+            # EIeff = M / kappa
+            # Ieff  = EIeff / Ec
+            #
+            # Absolute values are used because the sign is controlled by
+            # the selected bending direction.
+            ei_eff = abs(m_s_eff / kappa_eff)
+            i_eff = ei_eff / e_service
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric(
+                "I effective @ service (x10^9 mm4)",
+                f"{i_eff / 1e9:.3f}"
+            )
+
+            c2.metric(
+                "EI effective @ service (kNm2)",
+                f"{ei_eff * 1e-9:,.0f}"
+            )
+
+            c3.metric(
+                "Ieff / Ihom",
+                f"{i_eff / i_hom:.3f}"
+            )
+
+            c1, c2, c3 = st.columns(3)
+
+            c1.metric(
+                "Curvature @ service (1/mm)",
+                f"{abs(kappa_eff):.4e}"
+            )
+
+            c2.metric(
+                "Concrete tension before cracking (MPa)",
+                f"{concrete_tension_eff:.3f}"
+            )
+
+            c3.metric(
+                "fct,eff (MPa)",
+                f"{fct_eff:.3f}"
+            )
+
+            # -------------------------------------------------
+            # Determine zero-strain axis from reinforcement strain
+            # -------------------------------------------------
+            try:
+                s_eff = sec_eff.calculate_service_stress(
+                    moment_curvature_results=mk_eff,
+                    m=m_s_eff
+                )
+
+                df_eff = bar_stress_table(s_eff)
+
+                y_bar = df_eff["y (mm)"].to_numpy(dtype=float)
+                steel_strain = (
+                    df_eff["Stress (MPa)"].to_numpy(dtype=float) / es
+                )
+
+                y_range = float(np.ptp(y_bar))
+
+                if y_range <= 1e-6:
+                    st.caption(
+                        "The service zero-strain axis cannot be determined "
+                        "because all reinforcement bars are at the same "
+                        "vertical level."
+                    )
+
+                else:
+                    strain_slope, strain_intercept = np.polyfit(
+                        y_bar,
+                        steel_strain,
+                        1
+                    )
+
+                    if abs(strain_slope) <= 1e-16:
+                        st.caption(
+                            "The service zero-strain axis cannot be determined "
+                            "because the fitted strain gradient is too small."
                         )
-            c1, c2 = st.columns(2)
-            c1.metric("EI homogeneous (kNm²)", f"{e_service * i_hom * 1e-9:,.0f}")
-            c2.metric("EI cracked (kNm²)", f"{e_service * i_cr * 1e-9:,.0f}")
-            c1, c2 = st.columns(2)
-            c1.metric("M_cr (kNm)", f"{cr.m_cr / 1e6:,.1f}")
-            c2.metric("Neutral axis depth, cracked (mm)", f"{cr.d_nc:,.0f}")
-            st.caption(f"Section transformed to concrete. {dir_txt.capitalize()} "
-                       f"bending, compression at {comp_face}. Cracked properties "
-                       "are for bending only (no axial force). Cracking uses fctm.")
+
+                    else:
+                        y_na_eff = -strain_intercept / strain_slope
+
+                        y_bottom = float(poly.bounds[1])
+                        y_top = float(poly.bounds[3])
+
+                        if sagging:
+                            na_depth_eff = y_top - y_na_eff
+                        else:
+                            na_depth_eff = y_na_eff - y_bottom
+
+                        st.metric(
+                            "Zero-strain-axis depth @ service "
+                            f"from {comp_face} face (mm)",
+                            f"{na_depth_eff:,.1f}"
+                        )
+
+                        if y_na_eff < y_bottom or y_na_eff > y_top:
+                            st.caption(
+                                "The zero-strain axis lies outside the concrete "
+                                "section. This can occur when axial compression "
+                                "or tension causes the entire section to have "
+                                "the same strain sign."
+                            )
+                        else:
+                            st.caption(
+                                "The service zero-strain-axis position is "
+                                "obtained from a linear fit through the calculated "
+                                "reinforcement strains. It is load-dependent and "
+                                "is not the same as the fully cracked pure-bending "
+                                "neutral axis."
+                            )
+
+            except Exception as na_exc:
+                st.caption(
+                    "The effective stiffness was calculated, but the service "
+                    "zero-strain axis could not be extracted: "
+                    f"{na_exc!r}"
+                )
+
+            st.success(
+                "The section is cracked at the entered service load. "
+                "Ieff is the secant stiffness Mser/kappa from the cracked "
+                "no-tension moment-curvature analysis, including Nser."
+            )
+
+            if cr is not None:
+                st.caption(
+                    f"For comparison: Icr/Ihom = {i_cr / i_hom:.3f} "
+                    f"for fully cracked pure bending, while "
+                    f"Ieff/Ihom = {i_eff / i_hom:.3f} at the entered "
+                    "service axial force and moment."
+                )
+
+    except Exception as exc:
+        st.warning(
+            "The load-dependent service stiffness could not be calculated. "
+            f"Reason: {exc!r}"
+        )
 
     # ---------------- tab 3: service stresses ----------------
     with tab3:
