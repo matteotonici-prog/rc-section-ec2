@@ -1247,7 +1247,7 @@ if run and geom_ok:
                     axis_font=7,
                     title_font=8,
                 ),
-                width=0.1,
+                width=1,
             )
 
     # ---------------- tab 4: ULS capacity ----------------
