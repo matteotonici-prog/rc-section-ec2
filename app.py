@@ -1275,8 +1275,8 @@ if run and geom_ok:
             show(
                 plot_bar_stresses(
                     sec,
-                    df_ser,
-                    "Reinforcement stresses (service)",
+                    df_uls,
+                    "Reinforcement stresses at ULS",
                     fig_width=12,
                     fig_height=12,
                     annotation_font=18,
