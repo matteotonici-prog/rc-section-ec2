@@ -1,3 +1,5 @@
+import time
+from core.analysis import compute_mn, max_spacing_73n
 import math
 
 import pandas as pd
