@@ -242,6 +242,11 @@ elif R["hash"] != cur_hash:
 else:
     status.success("Results are up to date.")
 
+if R is not None and R.get("time"):
+    with top.expander("Calculation time (seconds)"):
+        st.write({k: round(v, 1) for k, v in R["time"].items()})
+        for line in R.get("mk_log", []):
+            st.caption(line)
 
 def need_results():
     if R is None:
