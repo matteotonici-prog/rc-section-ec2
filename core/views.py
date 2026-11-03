@@ -128,6 +128,16 @@ def uls_bending(R):
                    "steel: elastic-plastic.")
 
     st.subheader("b) M-N interaction diagram")
+    st.caption("Computed on demand because it needs many ultimate analyses. "
+               "The parabola-rectangle model is noticeably slower than the "
+               "rectangular block.")
+    both = st.checkbox("Also compute the opposite bending direction "
+                       "(doubles the time)", key="mn_both")
+    if st.button("Compute M-N diagram", key="mn_btn"):
+        with st.spinner("Computing the M-N diagram..."):
+            t0 = time.perf_counter()
+            compute_mn(R, both)
+            R["time"]["M-N diagram"] = time.perf_counter() - t0
     for e in R.get("mn_err", []):
         st.warning(f"The M-N curve could not be calculated ({e}). If this keeps "
                    "happening, choose Python 3.12 in the app's advanced settings.")
