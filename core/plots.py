@@ -149,3 +149,20 @@ def plot_mn(curves, m_ed, n_kn, sagging):
     ax.grid(True)
     ax.legend()
     return fig
+    
+def plot_biaxial(mxs, mys, dx, dy, cap_pt, n_kn):
+    """Biaxial capacity diagram at N_Ed with the design point (kNm)."""
+    fig, ax = plt.subplots()
+    xs, ys = list(mxs) + [mxs[0]], list(mys) + [mys[0]]
+    ax.fill(xs, ys, color=TENSION, alpha=0.18)
+    ax.plot(xs, ys, color=TENSION, lw=1.8, label=f"Capacity at N = {n_kn:,.0f} kN")
+    ax.plot([0, cap_pt[0]], [0, cap_pt[1]], color=GREY, ls="--", lw=0.9)
+    ax.plot(dx, dy, "o", color=COMPRESSION, ms=7, label="(M_Ed,x, M_Ed,y)")
+    ax.axhline(0, color=GREY, lw=0.8)
+    ax.axvline(0, color=GREY, lw=0.8)
+    ax.set_xlabel("M_x (kNm)")
+    ax.set_ylabel("M_y (kNm)")
+    ax.set_aspect("equal", adjustable="datalim")
+    ax.grid(True)
+    ax.legend()
+    return fig
