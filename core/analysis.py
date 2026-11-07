@@ -1,6 +1,6 @@
+import math
 import time
 from contextlib import contextmanager
-import math
 
 import numpy as np
 import pandas as pd
@@ -15,7 +15,10 @@ from shapely.geometry import box
 
 from core.geometry import area
 from core.materials import CLASSES, ec2_concrete, make_profiles
-from core.plots import plot_bar_stresses, plot_mn, plot_preview, soften, to_png
+from core.plots import (
+    plot_bar_stresses, plot_biaxial, plot_mn, plot_preview, soften, to_png,
+)
+from core.shear import auto_shear_dims, shear_check
 
 # EN 1992-1-1 Table 7.3N: max bar spacing (mm) for wk = 0.4 / 0.3 / 0.2 mm
 TABLE_73N = {160: (300, 300, 200), 200: (300, 250, 150), 240: (250, 200, 100),
@@ -31,6 +34,15 @@ def max_spacing_73n(sigma_s, wmax):
         if sigma_s <= s:
             return TABLE_73N[s][col]
     return None
+
+
+@contextmanager
+def timed(R, name):
+    t0 = time.perf_counter()
+    try:
+        yield
+    finally:
+        R["time"][name] = R["time"].get(name, 0.0) + time.perf_counter() - t0
 
 
 def make_section_factory(lay, g, ult_profile, steel, p, cls):
@@ -54,6 +66,27 @@ def make_section_factory(lay, g, ult_profile, steel, p, cls):
     return make_section
 
 
+def build_ctx(lay, g, mat):
+    """Everything that depends only on geometry and materials."""
+    p = ec2_concrete(CLASSES[mat["cls"]], mat["acc"], mat["gamma_c"])
+    es = float(mat["es"])
+    fyd = mat["fyk"] / mat["gamma_s"]
+    e_lt = es / mat["n_long"]
+    e_service = e_lt if mat["basis_long"] else p["ecm"]
+    fct_eff = (max((1.6 - lay["h_depth"] / 1000) * p["fctm"], p["fctm"])
+               if mat["crack_basis_fl"] else p["fctm"])
+    ult_profile, steel_profile, steel = make_profiles(
+        p, fyd, es, mat["eud"], mat["ult_model"])
+    make_section = make_section_factory(lay, g, ult_profile, steel, p, mat["cls"])
+    sec = make_section(ConcreteLinear(elastic_modulus=e_service))
+    return dict(p=p, es=es, fyd=fyd, e_lt=e_lt, e_service=e_service,
+                fct_eff=fct_eff, ult_profile=ult_profile,
+                steel_profile=steel_profile, steel=steel,
+                make_section=make_section, sec=sec, fck=CLASSES[mat["cls"]],
+                mat=mat, h_depth=lay["h_depth"],
+                basis_txt="Long-term" if mat["basis_long"] else "Short-term")
+
+
 def bar_stress_table(sres):
     """One row per reinforcing bar (numeric, unrounded)."""
     rows = []
@@ -72,15 +105,46 @@ def bar_stress_table(sres):
         })
     return pd.DataFrame(rows)
 
-@contextmanager
-def timed(R, name):
-    t0 = time.perf_counter()
+
+def homogeneous_props(sec, lay, e_service, es):
+    """Transformed, uncracked section: area, centroid and inertia."""
+    tg = sec.get_transformed_gross_properties(elastic_modulus=e_service)
+    alpha = es / e_service
+    a_s = sum(area(d) for _, _, d, _ in lay["bars"])
+    s_y = sum(area(d) * y for _, y, d, _ in lay["bars"])
+    a_c = lay["conc_area"]
+    a_hom = a_c + (alpha - 1.0) * a_s
+    y_hom = (a_c * lay["conc_cy"] + (alpha - 1.0) * s_y) / a_hom
+    i_hom = float(tg.ixx_c)
+    return dict(alpha=alpha, a_c=a_c, a_s=a_s, a_hom=a_hom,
+                y_hom=y_hom - lay["y_min"], i_hom=i_hom, ei_hom=e_service * i_hom)
+
+
+def cracked_props(sec, e_service, theta):
+    cr = sec.calculate_cracked_properties(theta=theta)
+    cr.calculate_transformed_properties(elastic_modulus=e_service)
+    i_cr = float(cr.iuu_cr)
+    return cr, dict(i_cr=i_cr, ei_cr=e_service * i_cr,
+                    m_cr=float(cr.m_cr) / 1e6, d_nc=float(cr.d_nc))
+
+
+def geo_results(ctx, lay):
+    """Automatic section results: homogeneous and cracked (pure bending)."""
+    out = {"err": {}}
+    sec, es, e = ctx["sec"], ctx["es"], ctx["e_service"]
     try:
-        yield
-    finally:
-        R["time"][name] = R["time"].get(name, 0.0) + time.perf_counter() - t0
+        out["hom"] = homogeneous_props(sec, lay, e, es)
+    except Exception as exc:
+        out["err"]["hom"] = repr(exc)
+    for key, th in (("sag", 0.0), ("hog", math.pi)):
+        try:
+            out[key] = cracked_props(sec, e, th)[1]
+        except Exception as exc:
+            out["err"][key] = repr(exc)
+    return out
 
 
+# ------------------------------------------------------------ service
 class ServiceRunner:
     """Runs each moment-curvature analysis and service stress only once."""
 
@@ -177,228 +241,6 @@ def effective_stiffness(runner, e_service, i_hom, fct_eff, es, poly, sagging,
     return out
 
 
-def compute_mn(R, both):
-    """M-N diagram on demand: chosen direction only, or both."""
-    sec, inp, sagging, h_depth = R["sec"], R["inp"], R["sagging"], R["h_depth"]
-    dirs = [(0.0, "Sagging"), (math.pi, "Hogging")]
-    if not both:
-        dirs = [dirs[0]] if sagging else [dirs[1]]
-    curves, errs = {}, []
-    for th, lab in dirs:
-        mi = None
-        try:
-            try:
-                mi = sec.moment_interaction_diagram(
-                    theta=th, n_points=24, progress_bar=False)
-            except Exception:
-                d_lim = max(1.0, 0.005 * h_depth)       # avoid micron-thin zones
-                mi = sec.moment_interaction_diagram(
-                    theta=th, n_points=24, limits=[("D", 1.0), ("d_n", d_lim)],
-                    progress_bar=False)
-        except Exception as exc:
-            errs.append(f"{lab}: {exc!r}")
-        if mi is None:
-            continue
-        n_list, m_list = mi.get_results_lists(moment="m_x")
-        ms = [m / 1e6 for m in m_list]                  # keep the real sign
-        if (th == 0.0 and sum(ms) < 0) or (th != 0.0 and sum(ms) > 0):
-            ms = [-m for m in ms]
-        curves[lab] = (ms, [n / 1e3 for n in n_list])
-    R["mn_err"] = errs
-    R["img"].pop("mn", None)
-    if curves:
-        R["img"]["mn"] = to_png(plot_mn(curves, inp["m_ed"], inp["n_ed"], sagging))
-
-
-def run_all(lay, g, inp):
-    """Runs the analyses; returns numbers, tables and PNG images."""
-    R = {"err": {}, "img": {}, "time": {}, "mk_log": []}
-    p = ec2_concrete(CLASSES[inp["cls"]], inp["acc"], inp["gamma_c"])
-    es = float(inp["es"])
-    fyd = inp["fyk"] / inp["gamma_s"]
-    sagging = bool(inp["sagging"])
-    theta = 0.0 if sagging else math.pi
-    e_lt = es / inp["n_long"]
-    long_basis = bool(inp["basis_long"])
-    e_service = e_lt if long_basis else p["ecm"]
-    fct_eff = (max((1.6 - lay["h_depth"] / 1000) * p["fctm"], p["fctm"])
-               if inp["crack_basis_fl"] else p["fctm"])
-    ult_profile, steel_profile, steel = make_profiles(
-        p, fyd, es, inp["eud"], inp["ult_model"])
-    make_section = make_section_factory(lay, g, ult_profile, steel, p, inp["cls"])
-    sec = make_section(ConcreteLinear(elastic_modulus=e_service))
-    runner = ServiceRunner(make_section, theta, sec, e_service, R["mk_log"])
-    n_ed = inp["n_ed"] * 1e3
-    n_s, m_s = inp["n_ser"] * 1e3, inp["m_ser"] * 1e6
-    R.update(p=p, fck=CLASSES[inp["cls"]], fyd=fyd, es=es, theta=theta,
-             sagging=sagging, e_service=e_service, e_lt=e_lt, fct_eff=fct_eff,
-             inp=inp, basis_txt="Long-term" if long_basis else "Short-term",
-             sec=sec, h_depth=lay["h_depth"])
-
-    try:
-        with timed(R, "section plot"):
-            R["img"]["section"] = to_png(sec.plot_section(render=False).get_figure())
-    except Exception as exc:
-        R["err"]["section"] = repr(exc)
-
-    cr = None
-    try:
-        with timed(R, "homogeneous properties"):
-            R["hom"] = homogeneous_props(sec, lay, e_service, es)
-    except Exception as exc:
-        R["err"]["hom"] = repr(exc)
-    try:
-        with timed(R, "cracked properties (pure bending)"):
-            cr = sec.calculate_cracked_properties(theta=theta)
-            cr.calculate_transformed_properties(elastic_modulus=e_service)
-            i_cr = float(cr.iuu_cr)
-            R["cr"] = dict(i_cr=i_cr, ei_cr=e_service * i_cr,
-                           m_cr=float(cr.m_cr) / 1e6, d_nc=float(cr.d_nc))
-    except Exception as exc:
-        cr = None
-        R["err"]["cr"] = repr(exc)
-    if "hom" in R:
-        try:
-            with timed(R, "stiffness at service load"):
-                R["eff"] = effective_stiffness(
-                    runner, e_service, R["hom"]["i_hom"], fct_eff, es,
-                    lay["poly"], sagging, n_s, m_s)
-        except Exception as exc:
-            R["err"]["eff"] = repr(exc)
-
-    try:
-        with timed(R, "service stresses"):
-            sres, state, t_unc, warn = None, None, None, None
-            try:
-                sres, state, t_unc = run_service(runner, fct_eff, e_service, n_s, m_s)
-                method = ("Uncracked section (concrete carries tension)"
-                          if state == "UNCRACKED"
-                          else "Cracked section (concrete resists no tension)")
-                method += ", including N_ser"
-            except Exception as exc:
-                if cr is None:
-                    raise
-                warn = (f"The service analysis with axial force failed ({exc!r}). "
-                        "Showing the elastic cracked bending-only result; N_ser is "
-                        "NOT included.")
-                sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_s)
-                state = "CRACKED (assumed)"
-                method = "Elastic cracked section, bending only (N_ser ignored)"
-            lo, hi = sres.get_concrete_stress_limits()
-            df = bar_stress_table(sres)
-            worst = df.loc[df["Stress (MPa)"].abs().idxmax()]
-            R["svc"] = dict(state=state, t_unc=t_unc, method=method, warn=warn,
-                            sig_c=max(float(hi), 0.0), t_conc=max(-float(lo), 0.0),
-                            sig_s=abs(float(worst["Stress (MPa)"])),
-                            worst_bar=int(worst["Bar"]), df=df)
-            R["img"]["svc_conc"] = to_png(
-                soften(sres.plot_stress(render=False).get_figure()))
-            R["img"]["svc_bars"] = to_png(
-                plot_bar_stresses(sec, df, "Reinforcement stresses (service)"))
-    except Exception as exc:
-        R["err"]["svc"] = repr(exc)
-
-    try:
-        with timed(R, "ULS bending"):
-            res = sec.ultimate_bending_capacity(theta=theta, n=n_ed)
-            uls = sec.calculate_ultimate_stress(ultimate_results=res)
-            df_u = bar_stress_table(uls)
-            R["uls"] = dict(m_rd=abs(res.m_xy) / 1e6,
-                            d_n=getattr(res, "d_n", None), df=df_u)
-            R["img"]["uls_conc"] = to_png(
-                soften(uls.plot_stress(render=False).get_figure()))
-            R["img"]["uls_bars"] = to_png(
-                plot_bar_stresses(sec, df_u, "Reinforcement stresses at ULS"))
-            try:
-                R["img"]["ss_conc"] = to_png(ult_profile.plot_stress_strain(
-                    title=f"Concrete ultimate: {inp['ult_model']}",
-                    render=False).get_figure())
-                R["img"]["ss_steel"] = to_png(steel_profile.plot_stress_strain(
-                    title="Steel: elastic-plastic", render=False).get_figure())
-            except Exception:
-                pass
-    except Exception as exc:
-        R["err"]["uls"] = repr(exc)
-
-    if g["shape"] == "Circular":
-        R["crack"] = {"status": "circular"}
-    else:
-        try:
-            with timed(R, "crack width"):
-                crack_long = bool(inp["crack_long"])
-                e_crack = e_lt if crack_long else p["ecm"]
-                alpha_e = es / e_crack                  # = n when long term
-                kt = 0.4 if crack_long else 0.6
-                s_q, state_q, t_q = run_service(
-                    runner, fct_eff, e_crack,
-                    inp["n_qp"] * 1e3, inp["m_qp"] * 1e6)
-                if state_q == "UNCRACKED":
-                    c = {"status": "uncracked", "t_q": t_q}
-                else:
-                    c = ec2_crack(bar_stress_table(s_q), lay["poly"], sagging, es,
-                                  alpha_e, p["fctm"], kt, inp["k1"], inp["k3"],
-                                  inp["k4"], inp["to_face"])
-                    if c["status"] == "ok":
-                        R["img"]["crack"] = to_png(plot_preview(
-                            lay["poly"], c["ten_bars"],
-                            "Ac,eff (yellow) and tension bars (blue)",
-                            band=c["band"]))
-                c.update(e_crack=e_crack, alpha_e=alpha_e, kt=kt, long=crack_long)
-                R["crack"] = c
-        except Exception as exc:
-            R["err"]["crack"] = repr(exc)
-    return R
-
-def homogeneous_props(sec, lay, e_service, es):
-    """Transformed, uncracked section: area, centroid and inertia."""
-    tg = sec.get_transformed_gross_properties(elastic_modulus=e_service)
-    alpha = es / e_service
-    a_s = sum(area(d) for _, _, d, _ in lay["bars"])
-    s_y = sum(area(d) * y for _, y, d, _ in lay["bars"])
-    a_c = lay["conc_area"]
-    a_hom = a_c + (alpha - 1.0) * a_s
-    y_hom = (a_c * lay["conc_cy"] + (alpha - 1.0) * s_y) / a_hom
-    i_hom = float(tg.ixx_c)
-    return dict(alpha=alpha, a_c=a_c, a_s=a_s, a_hom=a_hom,
-                y_hom=y_hom - lay["y_min"], i_hom=i_hom, ei_hom=e_service * i_hom)
-
-    
-    sec_c = make_section(ConcreteLinearNoTension(elastic_modulus=e_service))
-    mk = sec_c.moment_curvature_analysis(theta=theta, n=n_s, progress_bar=False)
-    moments = np.asarray(mk.m_xy, dtype=float)
-    if moments.size == 0:
-        raise ValueError("The moment-curvature analysis returned no results.")
-    m_min, m_max = float(moments.min()), float(moments.max())
-    if m_s < m_min - 1e-6 or m_s > m_max + 1e-6:
-        raise ValueError(f"M_ser is outside the generated moment-curvature range "
-                         f"({m_min / 1e6:,.1f} to {m_max / 1e6:,.1f} kNm).")
-    kappa = float(mk.get_curvature(moment=m_s))
-    if not np.isfinite(kappa) or abs(kappa) <= 1e-16:
-        raise ValueError("The service curvature is not valid.")
-    ei = abs(m_s / kappa)
-    out.update(kind="cracked", i_eff=ei / e_service, ei_eff=ei, kappa=abs(kappa),
-               na_depth=None, na_outside=False, na_msg=None)
-    try:                                  # zero-strain axis from the bar strains
-        s_eff = sec_c.calculate_service_stress(moment_curvature_results=mk, m=m_s)
-        df = bar_stress_table(s_eff)
-        y = df["y (mm)"].to_numpy(float)
-        eps = df["Stress (MPa)"].to_numpy(float) / es
-        if np.ptp(y) <= 1e-6:
-            out["na_msg"] = "All bars are at one level: the neutral axis cannot be found."
-        else:
-            slope, icpt = np.polyfit(y, eps, 1)
-            if abs(slope) <= 1e-16:
-                out["na_msg"] = "The strain gradient is too small to find the neutral axis."
-            else:
-                y_na = -icpt / slope
-                y_bot, y_top = poly.bounds[1], poly.bounds[3]
-                out["na_depth"] = (y_top - y_na) if sagging else (y_na - y_bot)
-                out["na_outside"] = bool(y_na < y_bot or y_na > y_top)
-    except Exception as exc:
-        out["na_msg"] = f"Neutral axis not extracted: {exc!r}"
-    return out
-
-
 def ec2_crack(df, poly, sagging, es, alpha_e, fct_eff, kt, k1, k3, k4, to_face):
     """EC2 7.3.4 crack width for the tension layers, from cracked-analysis bar stresses."""
     minx, y_min, maxx, y_max = poly.bounds
@@ -466,102 +308,247 @@ def ec2_crack(df, poly, sagging, es, alpha_e, fct_eff, kt, k1, k3, k4, to_face):
                 band=band, d_t=d_t, ten_bars=ten_bars)
 
 
-    # ---- section figure
-    try:
-        R["img"]["section"] = to_png(sec.plot_section(render=False).get_figure())
-    except Exception as exc:
-        R["err"]["section"] = repr(exc)
+def run_sls(ctx, lay, g, act):
+    """SLS check: stiffness at service load, stresses and crack width."""
+    mat = ctx["mat"]
+    sec, p, es = ctx["sec"], ctx["p"], ctx["es"]
+    e_service, e_lt, fct_eff = ctx["e_service"], ctx["e_lt"], ctx["fct_eff"]
+    sagging = bool(act["sagging"])
+    theta = 0.0 if sagging else math.pi
+    R = {"err": {}, "img": {}, "time": {}, "mk_log": [], "act": act, "mat": mat,
+         "p": p, "fck": ctx["fck"], "es": es, "e_service": e_service,
+         "fct_eff": fct_eff, "basis_txt": ctx["basis_txt"], "sagging": sagging}
+    runner = ServiceRunner(ctx["make_section"], theta, sec, e_service, R["mk_log"])
+    n_s, m_s = act["n_ser"] * 1e3, act["m_ser"] * 1e6
 
-    # ---- homogeneous, cracked (pure bending), effective at service
     cr = None
     try:
-        R["hom"] = homogeneous_props(sec, lay, e_service, es)
+        with timed(R, "homogeneous properties"):
+            R["hom"] = homogeneous_props(sec, lay, e_service, es)
     except Exception as exc:
         R["err"]["hom"] = repr(exc)
     try:
-        cr = sec.calculate_cracked_properties(theta=theta)
-        cr.calculate_transformed_properties(elastic_modulus=e_service)
-        i_cr = float(cr.iuu_cr)
-        R["cr"] = dict(i_cr=i_cr, ei_cr=e_service * i_cr, m_cr=float(cr.m_cr) / 1e6,
-                       d_nc=float(cr.d_nc))
+        with timed(R, "cracked properties (pure bending)"):
+            cr, R["cr"] = cracked_props(sec, e_service, theta)
     except Exception as exc:
         cr = None
         R["err"]["cr"] = repr(exc)
     if "hom" in R:
         try:
-            R["eff"] = effective_stiffness(
-                sec, make_section, theta, e_service, R["hom"]["i_hom"], fct_eff, es,
-                lay["poly"], sagging, n_s, m_s)
+            with timed(R, "stiffness at service load"):
+                R["eff"] = effective_stiffness(
+                    runner, e_service, R["hom"]["i_hom"], fct_eff, es,
+                    lay["poly"], sagging, n_s, m_s)
         except Exception as exc:
             R["err"]["eff"] = repr(exc)
 
-    # ---- service stresses
     try:
-        sres, state, t_unc, warn = None, None, None, None
-        try:
-            sres, state, t_unc = run_service(make_section, theta, fct_eff, sec,
-                                             e_service, n_s, m_s)
-            method = ("Uncracked section (concrete carries tension)"
-                      if state == "UNCRACKED"
-                      else "Cracked section (concrete resists no tension)")
-            method += ", including N_ser"
-        except Exception as exc:
-            if cr is None:
-                raise
-            warn = (f"The service analysis with axial force failed ({exc!r}). "
-                    "Showing the elastic cracked bending-only result; N_ser is NOT "
-                    "included.")
-            sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_s)
-            state = "CRACKED (assumed)"
-            method = "Elastic cracked section, bending only (N_ser ignored)"
-        lo, hi = sres.get_concrete_stress_limits()
-        df = bar_stress_table(sres)
-        worst = df.loc[df["Stress (MPa)"].abs().idxmax()]
-        R["svc"] = dict(state=state, t_unc=t_unc, method=method, warn=warn,
-                        sig_c=max(float(hi), 0.0), t_conc=max(-float(lo), 0.0),
-                        sig_s=abs(float(worst["Stress (MPa)"])),
-                        worst_bar=int(worst["Bar"]), df=df)
-        R["img"]["svc_conc"] = to_png(soften(sres.plot_stress(render=False).get_figure()))
-        R["img"]["svc_bars"] = to_png(
-            plot_bar_stresses(sec, df, "Reinforcement stresses (service)"))
+        with timed(R, "service stresses"):
+            sres, state, t_unc, warn = None, None, None, None
+            try:
+                sres, state, t_unc = run_service(runner, fct_eff, e_service, n_s, m_s)
+                method = ("Uncracked section (concrete carries tension)"
+                          if state == "UNCRACKED"
+                          else "Cracked section (concrete resists no tension)")
+                method += ", including N_ser"
+            except Exception as exc:
+                if cr is None:
+                    raise
+                warn = (f"The service analysis with axial force failed ({exc!r}). "
+                        "Showing the elastic cracked bending-only result; N_ser is "
+                        "NOT included.")
+                sres = sec.calculate_cracked_stress(cracked_results=cr, m=m_s)
+                state = "CRACKED (assumed)"
+                method = "Elastic cracked section, bending only (N_ser ignored)"
+            lo, hi = sres.get_concrete_stress_limits()
+            df = bar_stress_table(sres)
+            worst = df.loc[df["Stress (MPa)"].abs().idxmax()]
+            R["svc"] = dict(state=state, t_unc=t_unc, method=method, warn=warn,
+                            sig_c=max(float(hi), 0.0), t_conc=max(-float(lo), 0.0),
+                            sig_s=abs(float(worst["Stress (MPa)"])),
+                            worst_bar=int(worst["Bar"]), df=df)
+            R["img"]["svc_conc"] = to_png(
+                soften(sres.plot_stress(render=False).get_figure()))
+            R["img"]["svc_bars"] = to_png(
+                plot_bar_stresses(sec, df, "Reinforcement stresses (service)"))
     except Exception as exc:
         R["err"]["svc"] = repr(exc)
 
-    # ---- ULS bending
-    try:
-        res = sec.ultimate_bending_capacity(theta=theta, n=n_ed)
-        uls = sec.calculate_ultimate_stress(ultimate_results=res)
-        df_u = bar_stress_table(uls)
-        R["uls"] = dict(m_rd=abs(res.m_xy) / 1e6, d_n=getattr(res, "d_n", None),
-                        df=df_u)
-        R["img"]["uls_conc"] = to_png(soften(uls.plot_stress(render=False).get_figure()))
-        R["img"]["uls_bars"] = to_png(
-            plot_bar_stresses(sec, df_u, "Reinforcement stresses at ULS"))
+    if g["shape"] == "Circular":
+        R["crack"] = {"status": "circular"}
+    else:
         try:
-            R["img"]["ss_conc"] = to_png(ult_profile.plot_stress_strain(
-                title=f"Concrete ultimate: {inp['ult_model']}", render=False).get_figure())
-            R["img"]["ss_steel"] = to_png(steel_profile.plot_stress_strain(
-                title="Steel: elastic-plastic", render=False).get_figure())
-        except Exception:
-            pass
-    except Exception as exc:
-        R["err"]["uls"] = repr(exc)
+            with timed(R, "crack width"):
+                crack_long = bool(mat["crack_long"])
+                e_crack = e_lt if crack_long else p["ecm"]
+                alpha_e = es / e_crack                  # = n when long term
+                kt = 0.4 if crack_long else 0.6
+                s_q, state_q, t_q = run_service(
+                    runner, fct_eff, e_crack, act["n_qp"] * 1e3, act["m_qp"] * 1e6)
+                if state_q == "UNCRACKED":
+                    c = {"status": "uncracked", "t_q": t_q}
+                else:
+                    c = ec2_crack(bar_stress_table(s_q), lay["poly"], sagging, es,
+                                  alpha_e, p["fctm"], kt, mat["k1"], mat["k3"],
+                                  mat["k4"], mat["to_face"])
+                    if c["status"] == "ok":
+                        R["img"]["crack"] = to_png(plot_preview(
+                            lay["poly"], c["ten_bars"],
+                            "Ac,eff (yellow) and tension bars (blue)",
+                            band=c["band"]))
+                c.update(e_crack=e_crack, alpha_e=alpha_e, kt=kt, long=crack_long)
+                R["crack"] = c
+        except Exception as exc:
+            R["err"]["crack"] = repr(exc)
+    return R
 
-    # ---- M-N diagram (both directions)
-    curves, mn_err = {}, []
-    for th, lab in ((0.0, "Sagging"), (math.pi, "Hogging")):
+
+# ---------------------------------------------------------------- ULS
+def radial_capacity(mxs, mys, dx, dy):
+    """Distance from the origin to the diagram boundary along the direction (dx, dy)."""
+    d = math.hypot(dx, dy)
+    if d <= 1e-12:
+        return None
+    ux, uy = dx / d, dy / d
+    pts = list(zip(mxs, mys))
+    best = None
+    for i in range(len(pts)):
+        x1, y1 = pts[i]
+        x2, y2 = pts[(i + 1) % len(pts)]
+        ex, ey = x2 - x1, y2 - y1
+        den = ux * ey - uy * ex
+        if abs(den) < 1e-12:
+            continue
+        t = (x1 * ey - y1 * ex) / den
+        s = (x1 * uy - y1 * ux) / den
+        if t > 0 and -1e-9 <= s <= 1 + 1e-9 and (best is None or t < best):
+            best = t
+    return best
+
+
+def run_uls(ctx, lay, g, act):
+    """ULS check: axial load with bending about x and y, and shear along y and x."""
+    mat = ctx["mat"]
+    sec, p, es = ctx["sec"], ctx["p"], ctx["es"]
+    R = {"err": {}, "img": {}, "time": {}, "act": act, "mat": mat, "p": p,
+         "fck": ctx["fck"], "fyd": ctx["fyd"]}
+    n_ed = act["n_ed"] * 1e3
+    mx, my = act["mx"] * 1e6, act["my"] * 1e6
+    biaxial = abs(act["my"]) > 1e-9
+
+    try:
+        with timed(R, "ULS bending"):
+            if not biaxial:
+                theta = 0.0 if act["mx"] >= 0 else math.pi
+                res = sec.ultimate_bending_capacity(theta=theta, n=n_ed)
+                uls = sec.calculate_ultimate_stress(ultimate_results=res)
+                df_u = bar_stress_table(uls)
+                R["bend"] = dict(kind="uniaxial", m_rd=abs(res.m_xy) / 1e6,
+                                 m_ed=abs(act["mx"]),
+                                 d_n=getattr(res, "d_n", None),
+                                 sagging=(theta == 0.0), df=df_u)
+            else:
+                bb = sec.biaxial_bending_diagram(
+                    n=n_ed, n_points=int(act["bb_points"]), progress_bar=False)
+                mxs, mys = bb.get_results_lists()
+                demand = math.hypot(mx, my)
+                cap = radial_capacity(mxs, mys, mx, my)
+                try:
+                    inside = bool(bb.point_in_diagram(mx, my))
+                except Exception:
+                    inside = None
+                best = max(bb.results, key=lambda r: (r.m_x * mx + r.m_y * my)
+                           / (math.hypot(r.m_x, r.m_y) or 1.0))
+                uls = sec.calculate_ultimate_stress(ultimate_results=best)
+                df_u = bar_stress_table(uls)
+
+                my_side = None                  # which face is compressed for M_y > 0
+                try:
+                    probe = min(bb.results, key=lambda r: abs(r.theta - math.pi / 2))
+                    dfp = bar_stress_table(
+                        sec.calculate_ultimate_stress(ultimate_results=probe))
+                    comp = dfp[dfp["Stress (MPa)"] > 1e-6]
+                    ten = dfp[dfp["Stress (MPa)"] < -1e-6]
+                    if not comp.empty and not ten.empty and abs(probe.m_y) > 1e-6:
+                        plus_x = comp["x (mm)"].mean() > ten["x (mm)"].mean()
+                        right = plus_x if probe.m_y > 0 else (not plus_x)
+                        my_side = "right (+x)" if right else "left (-x)"
+                except Exception:
+                    pass
+
+                mxs_k = [m / 1e6 for m in mxs]
+                mys_k = [m / 1e6 for m in mys]
+                cap_pt = ((cap * mx / demand / 1e6, cap * my / demand / 1e6)
+                          if cap else (0.0, 0.0))
+                R["bend"] = dict(
+                    kind="biaxial", mx_ed=act["mx"], my_ed=act["my"],
+                    m_res=demand / 1e6, cap=(cap / 1e6 if cap else None),
+                    util=(demand / cap if cap else None), inside=inside,
+                    my_side=my_side, df=df_u, theta_best=best.theta)
+                R["img"]["biax"] = to_png(plot_biaxial(
+                    mxs_k, mys_k, act["mx"], act["my"], cap_pt, act["n_ed"]))
+            R["img"]["uls_conc"] = to_png(
+                soften(uls.plot_stress(render=False).get_figure()))
+            R["img"]["uls_bars"] = to_png(
+                plot_bar_stresses(sec, R["bend"]["df"], "Reinforcement stresses at ULS"))
+            try:
+                R["img"]["ss_conc"] = to_png(ctx["ult_profile"].plot_stress_strain(
+                    title=f"Concrete ultimate: {mat['ult_model']}",
+                    render=False).get_figure())
+                R["img"]["ss_steel"] = to_png(ctx["steel_profile"].plot_stress_strain(
+                    title="Steel: elastic-plastic", render=False).get_figure())
+            except Exception:
+                pass
+    except Exception as exc:
+        R["err"]["bend"] = repr(exc)
+
+    try:
+        with timed(R, "ULS shear"):
+            dims = auto_shear_dims(lay, act["mx"] >= 0)
+            use = dict(
+                bw_y=act["bw_y"] if act["bw_y"] > 0 else dims["bw_y"],
+                d_y=act["d_y"] if act["d_y"] > 0 else dims["d_y"],
+                bw_x=act["bw_x"] if act["bw_x"] > 0 else dims["bw_x"],
+                d_x=act["d_x"] if act["d_x"] > 0 else dims["d_x"],
+                asl_y=dims["asl_y"], asl_x=dims["asl_x"])
+
+            def one(v, bw, d, asl, legs):
+                return shear_check(
+                    abs(v), bw, d, asl, lay["conc_area"], act["n_ed"], ctx["fck"],
+                    mat["gamma_c"], mat["acc_shear"], mat["fywk"], mat["gamma_s"],
+                    g["link"], legs, act["s_link"], act["cot_mode"],
+                    act["cot_manual"], g.get("c_nom"))
+
+            R["shear"] = dict(
+                y=one(act["vy"], use["bw_y"], use["d_y"], use["asl_y"], act["legs_y"]),
+                x=one(act["vx"], use["bw_x"], use["d_x"], use["asl_x"], act["legs_x"]),
+                dims=use)
+    except Exception as exc:
+        R["err"]["shear"] = repr(exc)
+    return R
+
+
+def compute_mn(ctx, R, both):
+    """Uniaxial M-N diagram about the x axis, on demand."""
+    sec, act, h_depth = ctx["sec"], R["act"], ctx["h_depth"]
+    sagging = act["mx"] >= 0
+    dirs = [(0.0, "Sagging"), (math.pi, "Hogging")]
+    if not both:
+        dirs = [dirs[0]] if sagging else [dirs[1]]
+    curves, errs = {}, []
+    for th, lab in dirs:
         mi = None
         try:
             try:
                 mi = sec.moment_interaction_diagram(
-                    theta=th, n_points=48, progress_bar=False)
+                    theta=th, n_points=24, progress_bar=False)
             except Exception:
-                d_lim = max(1.0, 0.005 * lay["h_depth"])   # avoid micron-thin zones
+                d_lim = max(1.0, 0.005 * h_depth)       # avoid micron-thin zones
                 mi = sec.moment_interaction_diagram(
-                    theta=th, n_points=48, limits=[("D", 1.0), ("d_n", d_lim)],
+                    theta=th, n_points=24, limits=[("D", 1.0), ("d_n", d_lim)],
                     progress_bar=False)
         except Exception as exc:
-            mn_err.append(f"{lab}: {exc!r}")
+            errs.append(f"{lab}: {exc!r}")
         if mi is None:
             continue
         n_list, m_list = mi.get_results_lists(moment="m_x")
@@ -569,36 +556,7 @@ def ec2_crack(df, poly, sagging, es, alpha_e, fct_eff, kt, k1, k3, k4, to_face):
         if (th == 0.0 and sum(ms) < 0) or (th != 0.0 and sum(ms) > 0):
             ms = [-m for m in ms]
         curves[lab] = (ms, [n / 1e3 for n in n_list])
-    R["mn_err"] = mn_err
+    R["mn_err"] = errs
+    R["img"].pop("mn", None)
     if curves:
-        R["img"]["mn"] = to_png(plot_mn(curves, inp["m_ed"], inp["n_ed"], sagging))
-
-    # ---- crack width (EC2 7.3.4), short or long term
-    if g["shape"] == "Circular":
-        R["crack"] = {"status": "circular"}
-    else:
-        try:
-            crack_long = bool(inp["crack_long"])
-            e_crack = e_lt if crack_long else p["ecm"]
-            alpha_e = es / e_crack                  # = n when long term
-            kt = 0.4 if crack_long else 0.6
-            sec_c = (sec if abs(e_service - e_crack) < 1e-6
-                     else make_section(ConcreteLinear(elastic_modulus=e_crack)))
-            s_q, state_q, t_q = run_service(
-                make_section, theta, fct_eff, sec_c, e_crack,
-                inp["n_qp"] * 1e3, inp["m_qp"] * 1e6)
-            if state_q == "UNCRACKED":
-                c = {"status": "uncracked", "t_q": t_q}
-            else:
-                c = ec2_crack(bar_stress_table(s_q), lay["poly"], sagging, es,
-                              alpha_e, p["fctm"], kt, inp["k1"], inp["k3"],
-                              inp["k4"], inp["to_face"])
-                if c["status"] == "ok":
-                    R["img"]["crack"] = to_png(plot_preview(
-                        lay["poly"], c["ten_bars"],
-                        "Ac,eff (yellow) and tension bars (blue)", band=c["band"]))
-            c.update(e_crack=e_crack, alpha_e=alpha_e, kt=kt, long=crack_long)
-            R["crack"] = c
-        except Exception as exc:
-            R["err"]["crack"] = repr(exc)
-    return R
+        R["img"]["mn"] = to_png(plot_mn(curves, abs(act["mx"]), act["n_ed"], sagging))
