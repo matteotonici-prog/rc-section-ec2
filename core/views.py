@@ -4,7 +4,7 @@ import time
 import pandas as pd
 import streamlit as st
 
-from core.analysis import compute_mn, max_spacing_73n
+from core.analysis import compute_mn, ensure_combo_images, max_spacing_73n
 from core.geometry import fmt
 from core.plots import show_png
 
@@ -55,7 +55,7 @@ def _eff_block(S):
                    f"{eff['i_eff'] / hom['i_hom']:.3f} at the service load.")
 
 
-def section_results(ctx, G, S, s_fresh):
+def section_results(ctx, G, S, s_fresh, has_sls=True):
     if ctx is None or G is None:
         st.info("Complete the geometry tab without errors to see the section "
                 "properties here.")
@@ -98,6 +98,9 @@ def section_results(ctx, G, S, s_fresh):
             st.metric(f"Neutral axis from the {face} face (mm)", f"{cr['d_nc']:,.1f}")
     st.caption("Fully cracked, pure bending (no axial force); concrete in tension "
                "is ignored. M_cr uses fctm.")
+
+    if not has_sls:
+        return
 
     st.subheader("c) Section at the service forces")
     if S is None:
@@ -156,26 +159,42 @@ def _shear_block(title, S):
         st.dataframe(pd.DataFrame(rows, columns=["Quantity", "Value"]),
                      hide_index=True)
 
+def _fmt_u(u):
+    if u is None:
+        return "-"
+    return "inf" if math.isinf(u) else f"{u:.2f}"
 
-def uls_view(R, ctx, fresh):
+
+def _combo_utils(c):
+    b, sh = c.get("bend"), c.get("shear")
+    ub = b.get("util") if b else None
+    uy = sh["y"].get("util") if sh else None
+    ux = sh["x"].get("util") if sh else None
+    vals = [u for u in (ub, uy, ux) if u is not None]
+    return ub, uy, ux, (max(vals) if vals else None)
+
+
+def _combo_detail(c, R, ctx, fresh, idx):
     act, mat = R["act"], R["mat"]
+    st.caption(f"N = {c['n']:,.1f} kN, M_x = {c['mx']:,.1f} kNm, M_y = {c['my']:,.1f} kNm, "
+               f"V_y = {c['vy']:,.1f} kN, V_x = {c['vx']:,.1f} kN.")
     st.subheader("a) Bending")
-    b = R.get("bend")
+    b = c.get("bend")
     if b is None:
-        st.error(f"The bending check failed: {R['err'].get('bend')}")
+        st.error(f"The bending check failed: {c.get('err_bend')}")
     elif b["kind"] == "uniaxial":
         c1, c2, c3 = st.columns(3)
         c1.metric("M_Rd (kNm)", f"{b['m_rd']:,.1f}")
         c2.metric("M_Ed,x (kNm)", f"{b['m_ed']:,.1f}")
-        c3.metric("M_Ed / M_Rd", f"{b['m_ed'] / b['m_rd']:.2f}" if b["m_rd"] > 0 else "n/a")
-        if b["m_rd"] > 0:
-            ok = b["m_ed"] <= b["m_rd"]
+        c3.metric("M_Ed / M_Rd", _fmt_u(b["util"]))
+        if b["util"] is not None:
+            ok = b["util"] <= 1.0
             _verdict(ok, "Bending resistance satisfied." if ok
                      else "Bending resistance NOT satisfied.")
         face = "top" if b["sagging"] else "bottom"
         st.caption(f"{'Sagging' if b['sagging'] else 'Hogging'} bending about the x "
-                   f"axis, compression at the {face}, N_Ed = {act['n_ed']:,.0f} kN. "
-                   f"Concrete: {mat['ult_model']}; steel: elastic-plastic.")
+                   f"axis, compression at the {face}. Concrete: {mat['ult_model']}; "
+                   "steel: elastic-plastic.")
         if b.get("d_n") is not None:
             st.metric(f"Neutral axis depth from the {face} face (mm)", f"{b['d_n']:,.1f}")
     else:
@@ -189,65 +208,59 @@ def uls_view(R, ctx, fresh):
         else:
             c1, c2 = st.columns(2)
             c1.metric("Capacity along the same direction (kNm)", f"{b['cap']:,.1f}")
-            c2.metric("Demand / capacity", f"{b['util']:.2f}")
+            c2.metric("Demand / capacity", _fmt_u(b["util"]))
             ok = b["util"] <= 1.0 if b["inside"] is None else bool(b["inside"])
             _verdict(ok, "Biaxial bending resistance satisfied: the design point is "
                      "inside the diagram." if ok else
                      "Biaxial bending resistance NOT satisfied: the design point is "
                      "outside the diagram.")
-        st.caption("Capacity is the exact boundary of the biaxial diagram at N_Ed, "
-                   "measured along the direction of the applied moment vector. "
-                   "M_x > 0: compression at the top. "
-                   + (f"M_y > 0: compression at the {b['my_side']} face."
-                      if b.get("my_side") else
-                      "M_y sign: could not be determined automatically."))
-        if "biax" in R["img"]:
-            show_png(R["img"]["biax"])
-        st.caption(f"The stresses below are for the computed neutral axis angle "
-                   f"closest to the applied moment direction "
-                   f"(θ = {math.degrees(b['theta_best']):.0f}°).")
+        st.caption("Capacity is the boundary of the biaxial diagram at N_Ed, measured "
+                   "along the applied moment direction. M_x > 0: compression at the "
+                   "top. " + (f"M_y > 0: compression at the {b['my_side']} face."
+                              if b.get("my_side") else
+                              "M_y sign: could not be determined automatically."))
 
     if b is not None:
-        show_png(R["img"]["uls_conc"])
-        show_png(R["img"]["uls_bars"], width=1)
-        st.dataframe(b["df"].round(1), hide_index=True)
-        st.caption("Stresses are those of the section at its capacity for the "
-                   "applied axial force, not at the applied moment. Compression is "
-                   "positive.")
+        if ctx is not None and fresh:
+            ensure_combo_images(ctx, c)
+        if "uls_bars" in c["img"]:
+            if "biax" in c["img"]:
+                show_png(c["img"]["biax"])
+            show_png(c["img"]["uls_conc"])
+            show_png(c["img"]["uls_bars"], width=1)
+            st.dataframe(b["df"].round(1), hide_index=True)
+            st.caption("Stresses are those of the section at its capacity for the "
+                       "applied axial force, not at the applied moment. Compression "
+                       "is positive.")
         if "ss_conc" in R["img"]:
             with st.expander("Stress-strain curves used"):
                 show_png(R["img"]["ss_conc"])
                 show_png(R["img"]["ss_steel"])
-
         st.markdown("**M-N interaction diagram (about the x axis)**")
-        st.caption("On demand: it needs many ultimate analyses. The parabola-rectangle "
-                   "model is slower than the rectangular block.")
         both = st.checkbox("Also compute the opposite bending direction",
-                           key="mn_both")
-        if st.button("Compute M-N diagram", key="mn_btn",
+                           key=f"mn_both_{idx}")
+        if st.button("Compute M-N diagram", key=f"mn_btn_{idx}",
                      disabled=(not fresh or ctx is None)):
             with st.spinner("Computing the M-N diagram..."):
-                t0 = time.perf_counter()
-                compute_mn(ctx, R, both)
-                R["time"]["M-N diagram"] = time.perf_counter() - t0
-        for e in R.get("mn_err", []):
+                compute_mn(ctx, c, both)
+        for e in c.get("mn_err", []):
             st.warning(f"The M-N curve could not be calculated ({e}). If this keeps "
                        "happening, choose Python 3.12 in the app's advanced settings.")
-        if "mn" in R["img"]:
-            show_png(R["img"]["mn"])
+        if "mn" in c["img"]:
+            show_png(c["img"]["mn"])
 
     st.subheader("b) Shear")
-    sh = R.get("shear")
+    sh = c.get("shear")
     if sh is None:
-        st.error(f"The shear check failed: {R['err'].get('shear')}")
+        st.error(f"The shear check failed: {c.get('err_shear')}")
     else:
         d = sh["dims"]
         st.caption(f"Links: Ø{act['link_dia']:.0f} at {act['s_link']:.0f} mm; "
                    f"{act['legs_y']} legs along y, {act['legs_x']} legs along x. "
                    f"fywk = {mat['fywk']:.0f} MPa, αcc (shear) = {mat['acc_shear']}. "
                    f"Strut angle: {'optimum' if act['cot_mode'] == 'optimum' else 'manual'}, "
-                   "cot θ limited to 1.0 to 2.5. z = 0.9d. Each direction is "
-                   "checked separately (EC2 has no biaxial shear interaction).")
+                   "cot θ limited to 1.0 to 2.5. z = 0.9d. Each direction is checked "
+                   "separately.")
         c1, c2 = st.columns(2)
         with c1:
             _shear_block(f"Shear along y, major axis (bw = {d['bw_y']:.0f} mm, "
@@ -256,6 +269,30 @@ def uls_view(R, ctx, fresh):
             _shear_block(f"Shear along x, minor axis (bw = {d['bw_x']:.0f} mm, "
                          f"d = {d['d_x']:.0f} mm)", sh["x"])
 
+
+def uls_view(R, ctx, fresh):
+    combos = R["combos"]
+    st.subheader("Summary of the load combinations")
+    rows, overall = [], []
+    for c in combos:
+        ub, uy, ux, u = _combo_utils(c)
+        overall.append(u if u is not None else 0.0)
+        rows.append({"Combination": c["name"], "N (kN)": f"{c['n']:,.0f}",
+                     "M major (kNm)": f"{c['mx']:,.0f}", "M minor (kNm)": f"{c['my']:,.0f}",
+                     "Bending": _fmt_u(ub), "Shear major": _fmt_u(uy),
+                     "Shear minor": _fmt_u(ux), "Max": _fmt_u(u),
+                     "Status": "✅ OK" if (u is not None and u <= 1.0) else "❌ NOT OK"})
+    st.dataframe(pd.DataFrame(rows), hide_index=True)
+    gov = max(range(len(combos)), key=lambda i: overall[i])
+    ok_all = all(u <= 1.0 for u in overall)
+    _verdict(ok_all, "All combinations satisfy the ULS checks." if ok_all else
+             f"The ULS checks are NOT satisfied. Governing combination: "
+             f"{combos[gov]['name']} (utilisation {_fmt_u(overall[gov])}).")
+    names = [c["name"] for c in combos]
+    sel = st.selectbox("Show the details of", names, index=gov, key="uls_sel")
+    idx = names.index(sel)
+    st.markdown(f"### Combination {sel}")
+    _combo_detail(combos[idx], R, ctx, fresh, idx)
 
 # =========================================================== 5 SLS CHECK
 def sls_view(R):
