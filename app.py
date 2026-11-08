@@ -6,7 +6,7 @@ import streamlit as st
 
 from core import views
 from core.analysis import build_ctx, geo_results, run_sls, run_uls
-from core.geometry import MAX_LAYERS, build_layout
+from core.geometry import BEAM_SHAPES, FLANGED, MAX_LAYERS, build_layout
 from core.materials import CLASSES
 from core.plots import apply_theme, plot_preview, show_fig
 from core.shear import auto_shear_dims
@@ -19,6 +19,7 @@ LAYER_COLS = {
     "dia": st.column_config.NumberColumn("dia (mm)", min_value=6.0),
     "gap": st.column_config.NumberColumn("gap to previous layer (mm)", min_value=0.0),
 }
+COMBO_COLS = ["N (kN)", "V major (kN)", "V minor (kN)", "M major (kNm)", "M minor (kNm)"]
 
 
 def _ser(o):
@@ -46,23 +47,45 @@ st.title("RC section check - Eurocode 2")
 
 # ============================================================ 1 GEOMETRY
 with t_geo:
-    shape = st.selectbox(
-        "Section type",
-        ["Rectangular", "T-section", "Rectangular wall", "Circular",
-         "Custom (coordinates)"], key="shape")
-    g = {"shape": shape, "elem": "Beam"}
+    element = st.radio("What do you want to analyse?",
+                       ["Beam", "Column", "RC wall", "Generic section"],
+                       horizontal=True, key="element")
+    if element == "Beam":
+        shapes = BEAM_SHAPES
+    elif element == "Column":
+        shapes = ["Rectangular", "Circular"]
+    elif element == "RC wall":
+        shapes = ["Rectangular wall"]
+    else:
+        shapes = ["Rectangular", "T-section", "Rectangular wall", "Circular",
+                  "Custom (coordinates)"]
+    shape = st.selectbox("Section type", shapes, key=f"shape_{element}")
+    if shape == "Rectangular wall":
+        reinf = "wall"
+    elif shape == "Circular":
+        reinf = "ring"
+    elif shape == "Custom (coordinates)":
+        reinf = "custom"
+    elif element == "Column":
+        reinf = "perimeter"
+    else:
+        reinf = "layers"
+    g = {"element": element, "shape": shape, "reinf": reinf, "elem": "Beam"}
+    k = f"{element}_{shape}"
 
     st.subheader("Geometry (mm)")
-    if shape == "Rectangular":
+    if shape == "Rectangular" or shape in FLANGED:
         c1, c2 = st.columns(2)
-        g["b"] = c1.number_input("Width b", 100.0, 3000.0, 300.0, key="rect_b")
-        g["h"] = c2.number_input("Overall depth h", 100.0, 3000.0, 500.0, key="rect_h")
-    elif shape == "T-section":
-        c1, c2 = st.columns(2)
-        g["b"] = c1.number_input("Web width b", 100.0, 3000.0, 300.0, key="tee_b")
-        g["h"] = c2.number_input("Overall depth h", 100.0, 3000.0, 600.0, key="tee_h")
-        g["bf"] = c1.number_input("Flange width bf", 100.0, 6000.0, 1200.0, key="tee_bf")
-        g["hf"] = c2.number_input("Flange depth hf", 50.0, 1000.0, 150.0, key="tee_hf")
+        g["b"] = c1.number_input("Web width b" if shape in FLANGED else "Width b",
+                                 100.0, 3000.0, 300.0, key=f"{k}_b")
+        g["h"] = c2.number_input("Overall depth h", 100.0, 5000.0, 500.0, key=f"{k}_h")
+        if shape in FLANGED:
+            g["bf"] = c1.number_input("Flange width bf (total, including the web)",
+                                      100.0, 6000.0, 1200.0, key=f"{k}_bf")
+            g["hf"] = c2.number_input("Flange depth hf", 50.0, 1000.0, 150.0,
+                                      key=f"{k}_hf")
+            if shape in ("L-section", "Inverted L-section"):
+                st.caption("The flange extends to the +x side of the web.")
     elif shape == "Rectangular wall":
         c1, c2 = st.columns(2)
         g["t_w"] = c1.number_input("Wall thickness t", 100.0, 1500.0, 200.0, key="wall_t")
@@ -71,9 +94,9 @@ with t_geo:
             "Wall orientation in the section",
             ["In-plane: length vertical (bending about the strong axis)",
              "Out-of-plane: length horizontal (bending about the weak axis)"],
-            key="wall_orient")
+            key=f"wall_orient_{element}")
     elif shape == "Circular":
-        g["diam"] = st.number_input("Diameter D", 200.0, 3000.0, 500.0, key="circ_d")
+        g["diam"] = st.number_input("Diameter D", 200.0, 3000.0, 500.0, key=f"{k}_d")
     else:
         st.caption("Concrete outline: vertices in order (x, y) in mm, y pointing up. "
                    "Add or delete rows as needed.")
@@ -98,31 +121,38 @@ with t_geo:
         g["c_nom"] = None
         g["cover_tot"] = 0.0
 
-    if shape in ("Rectangular", "T-section"):
+    if reinf == "layers":
         if shape == "Rectangular":
             g["elem"] = st.radio("Element type for the maximum spacing check",
                                  ["Beam", "Slab (one-way, main bars)"],
-                                 horizontal=True, key="elem")
+                                 horizontal=True, key=f"elem_{element}")
         st.caption(
             "Bottom layers are counted from the bottom face upwards, top layers "
             "from the top face downwards. The first layer of each group sits at "
             "cover + link dia + bar dia/2 from the face; 'gap' is the clear vertical "
             "distance to the previous layer (ignored for the first layer). Outer "
-            "bars of every layer sit at cover + link dia from the sides. "
-            f"Up to {MAX_LAYERS} layers in total."
-            + (" In a T-section, a layer whose centre is inside the flange spreads "
-               "across the flange width, otherwise across the web."
-               if shape == "T-section" else ""))
+            "bars of every layer sit at cover + link dia from the sides, and a layer "
+            "spans the section width at its height. "
+            f"Up to {MAX_LAYERS} layers in total.")
         st.markdown("**Bottom layers**")
         g["bottom_df"] = st.data_editor(
             pd.DataFrame({"n": [4], "dia": [25.0], "gap": [25.0]}),
-            num_rows="dynamic", key=f"bot_{shape}", column_config=LAYER_COLS)
+            num_rows="dynamic", key=f"bot_{k}", column_config=LAYER_COLS)
         st.markdown("**Top layers**")
         g["top_df"] = st.data_editor(
             pd.DataFrame({"n": [3 if shape == "Rectangular" else 6],
                           "dia": [16.0], "gap": [25.0]}),
-            num_rows="dynamic", key=f"top_{shape}", column_config=LAYER_COLS)
-    elif shape == "Rectangular wall":
+            num_rows="dynamic", key=f"top_{k}", column_config=LAYER_COLS)
+    elif reinf == "perimeter":
+        st.caption("Perimeter bars: bars along the top and bottom faces (corner bars "
+                   "included) plus intermediate bars on each side face.")
+        c1, c2, c3 = st.columns(3)
+        g["nb"] = c1.number_input("Bars along the top and bottom faces (min 2)",
+                                  2, 20, 3, key="col_nb")
+        g["nh"] = c2.number_input("Intermediate bars on each side face", 0, 20, 1,
+                                  key="col_nh")
+        g["col_dia"] = c3.number_input("Bar dia (mm)", 8, 40, 25, key="col_dia")
+    elif reinf == "wall":
         st.caption("Vertical bars on each face, given as diameter @ spacing along the "
                    "wall length. Bars per face = floor((L − 2·(cover + link + φ/2)) / "
                    "spacing) + 1, centred along the wall.")
@@ -131,13 +161,10 @@ with t_geo:
         g["f1_s"] = c1.number_input("Face 1 spacing (mm)", 50, 600, 200, key="f1s")
         g["f2_dia"] = c2.number_input("Face 2 bar dia (mm)", 6, 40, 12, key="f2d")
         g["f2_s"] = c2.number_input("Face 2 spacing (mm)", 50, 600, 200, key="f2s")
-        g["d_min"] = st.number_input(
-            "Minimum distance between the two layers, centre to centre (mm)",
-            50, 1000, 200, key="dmin")
-    elif shape == "Circular":
+    elif reinf == "ring":
         c1, c2 = st.columns(2)
-        g["n_bar"] = c1.number_input("Number of bars (equally spaced)", 2, 60, 8, key="nbar")
-        g["dia_bar"] = c2.number_input("Bar dia (mm)", 6, 40, 25, key="diabar")
+        g["n_bar"] = c1.number_input("Number of bars (equally spaced)", 2, 60, 8, key=f"nbar_{element}")
+        g["dia_bar"] = c2.number_input("Bar dia (mm)", 6, 40, 25, key=f"diabar_{element}")
     else:
         st.caption("Bars: centre coordinates (x, y) and diameter, in mm.")
         g["bar_df"] = st.data_editor(
@@ -160,11 +187,11 @@ with t_geo:
         if any(r["Status"].startswith("⚠️") for r in lay["rows"]):
             st.warning("Some bar spacings do not meet the EC2 limits below.")
         lim_txt = "EC2 8.2(2): clear spacing ≥ max(φ, dg + 5 mm, 20 mm). "
-        if shape == "Rectangular wall":
+        if reinf == "wall":
             lim_txt += "EC2 9.6.2(1): vertical bars at most min(3t, 400 mm) apart. "
-        elif shape == "Rectangular" and g["elem"].startswith("Slab"):
+        elif reinf == "layers" and shape == "Rectangular" and g["elem"].startswith("Slab"):
             lim_txt += "EC2 9.3.1.1(3): main bars at most min(3h, 400 mm) apart. "
-        elif shape in ("Rectangular", "T-section"):
+        elif reinf == "layers" and element in ("Beam", "Generic section"):
             lim_txt += ("Beams: the maximum spacing is governed by crack control "
                         "(EC2 7.3.3), see the crack width check in tab 5. ")
         st.caption(lim_txt + "Recommended values; check the National Annex.")
@@ -246,75 +273,75 @@ if lay["ok"]:
 # ============================================================ 4 ULS CHECK
 with t_uls:
     st.subheader("Design actions (ultimate limit state)")
-    n_ed = st.number_input("Axial load N_Ed (kN, compression +ve)",
-                           -5000.0, 50000.0, 0.0, key="ned")
-    c1, c2 = st.columns(2)
-    mx = c1.number_input("Bending about x, major axis: M_Ed,x (kNm)",
-                         -50000.0, 50000.0, 150.0, key="mx")
-    my = c2.number_input("Bending about y, minor axis: M_Ed,y (kNm)",
-                         -50000.0, 50000.0, 0.0, key="my")
-    c1, c2 = st.columns(2)
-    vy = c1.number_input("Shear along y, major axis: V_Ed,y (kN)",
-                         -50000.0, 50000.0, 0.0, key="vy")
-    vx = c2.number_input("Shear along x, minor axis: V_Ed,x (kN)",
-                         -50000.0, 50000.0, 0.0, key="vx")
-    st.caption("M_x > 0: compression at the top (sagging); M_x < 0: hogging. "
-               "M_y follows the library's sign convention and the compressed face "
-               "for M_y > 0 is reported after the check. Shear signs are ignored. "
-               "With M_y = 0 the bending check is uniaxial and fast; with M_y ≠ 0 "
-               "it builds the full biaxial diagram at N_Ed.")
-    bb_points = st.select_slider("Biaxial diagram points (used when M_y ≠ 0)",
+    st.caption("One row per load combination. You can paste straight from Excel: "
+               "click the first cell and press Ctrl+V. Axial force: compression "
+               "positive. M major = about the x axis (M > 0: compression at the top), "
+               "M minor = about the y axis. Shear signs are ignored.")
+    default_combos = pd.DataFrame({
+        "Combo": ["ULS 1"], "N (kN)": [0.0], "V major (kN)": [0.0],
+        "V minor (kN)": [0.0], "M major (kNm)": [150.0], "M minor (kNm)": [0.0]})
+    combos_df = st.data_editor(
+        default_combos, num_rows="dynamic", key=f"combos_{element}",
+        column_config={c: st.column_config.NumberColumn(c, format="%.1f")
+                       for c in COMBO_COLS})
+    cdf = combos_df.dropna(how="all").copy()
+    for col in COMBO_COLS:
+        cdf[col] = pd.to_numeric(cdf[col], errors="coerce").fillna(0.0)
+    cdf["Combo"] = cdf["Combo"].fillna("").astype(str)
+    combos = [dict(name=(r[0] or f"Combo {i + 1}"), n=float(r[1]), vy=float(r[2]),
+                   vx=float(r[3]), mx=float(r[4]), my=float(r[5]))
+              for i, r in enumerate(cdf[["Combo"] + COMBO_COLS]
+                                    .itertuples(index=False, name=None))]
+    bb_points = st.select_slider("Biaxial diagram points (used when a combination "
+                                 "has a minor-axis moment)",
                                  options=[16, 24, 32, 48], value=24, key="bbp")
 
     st.subheader("Shear links")
-    c1, c2, c3 = st.columns(3)
+    c1, c2 = st.columns(2)
     c1.metric("Link diameter (from the geometry tab)", f"{g['link']:.0f} mm")
     s_link = c2.number_input("Link spacing s (mm)", 25.0, 1000.0, 200.0, key="slink")
-    c3.write("")
     c1, c2 = st.columns(2)
-    legs_y = c1.number_input("Number of legs resisting V_y (along y)", 0, 20, 2, key="legsy")
-    legs_x = c2.number_input("Number of legs resisting V_x (along x)", 0, 20, 2, key="legsx")
+    legs_y = c1.number_input("Number of legs resisting the major shear (along y)",
+                             0, 20, 2, key="legsy")
+    legs_x = c2.number_input("Number of legs resisting the minor shear (along x)",
+                             0, 20, 2, key="legsx")
     c1, c2 = st.columns(2)
     cot_mode_txt = c1.radio("Strut angle", ["Optimum (VRd,s = VRd,max)", "Manual"],
                             key="cotmode")
     cot_manual = c2.number_input("cot θ if manual (1.0 to 2.5)", 1.0, 2.5, 2.5,
                                  key="cotm")
-
-    if lay["ok"]:
-        dims = auto_shear_dims(lay, mx >= 0)
-    else:
-        dims = dict(bw_y=300.0, d_y=450.0, bw_x=500.0, d_x=250.0)
-    with st.expander("Shear dimensions (calculated from the section, editable)"):
-        st.caption("Defaults: bw = smallest section width between the faces; d = "
-                   "distance from the compression face to the centroid of the tension "
-                   "half of the bars. They are approximate for T, circular and custom "
-                   "sections, so edit them if needed. Changing the geometry resets them.")
+    with st.expander("Shear dimensions (automatic unless you enter a value)"):
+        if lay["ok"]:
+            da = auto_shear_dims(lay, True)
+            st.caption(f"Automatic values (sagging): bw,y = {da['bw_y']:.0f} mm, "
+                       f"d,y = {da['d_y']:.0f} mm, bw,x = {da['bw_x']:.0f} mm, "
+                       f"d,x = {da['d_x']:.0f} mm. bw = smallest width between the "
+                       "faces; d = depth to the centroid of the tension half of the "
+                       "bars, so it follows the sign of each combination's moment. "
+                       "They are approximate for T, L, circular and custom sections. "
+                       "Enter 0 to keep the automatic value.")
         c1, c2 = st.columns(2)
-        bw_y = c1.number_input("bw for V_y (mm)", 0.0, 50000.0,
-                               float(round(dims["bw_y"])),
-                               key=f"bwy_{int(round(dims['bw_y']))}")
-        d_y = c1.number_input("d for V_y (mm)", 0.0, 50000.0,
-                              float(round(dims["d_y"])),
-                              key=f"dy_{int(round(dims['d_y']))}")
-        bw_x = c2.number_input("bw for V_x (mm)", 0.0, 50000.0,
-                               float(round(dims["bw_x"])),
-                               key=f"bwx_{int(round(dims['bw_x']))}")
-        d_x = c2.number_input("d for V_x (mm)", 0.0, 50000.0,
-                              float(round(dims["d_x"])),
-                              key=f"dx_{int(round(dims['d_x']))}")
+        bw_y = c1.number_input("bw for the major shear (mm), 0 = automatic",
+                               0.0, 50000.0, 0.0, key="bwy")
+        d_y = c1.number_input("d for the major shear (mm), 0 = automatic",
+                              0.0, 50000.0, 0.0, key="dy")
+        bw_x = c2.number_input("bw for the minor shear (mm), 0 = automatic",
+                               0.0, 50000.0, 0.0, key="bwx")
+        d_x = c2.number_input("d for the minor shear (mm), 0 = automatic",
+                              0.0, 50000.0, 0.0, key="dx")
 
     act_uls = dict(
-        n_ed=n_ed, mx=mx, my=my, vy=vy, vx=vx, bb_points=bb_points,
-        s_link=s_link, legs_y=legs_y, legs_x=legs_x, link_dia=g["link"],
+        combos=combos, bb_points=bb_points, s_link=s_link, legs_y=legs_y,
+        legs_x=legs_x, link_dia=g["link"],
         cot_mode="optimum" if cot_mode_txt.startswith("Optimum") else "manual",
         cot_manual=cot_manual, bw_y=bw_y, d_y=d_y, bw_x=bw_x, d_x=d_x)
     uls_hash = digest(g, mat, act_uls)
 
     run_uls_btn = st.button("▶ Run ULS check", type="primary",
-                            disabled=ctx is None, key="uls_btn")
+                            disabled=(ctx is None or not combos), key="uls_btn")
     uls_box = st.empty()
-    if run_uls_btn and ctx is not None:
-        with st.spinner("Running the ULS check (a biaxial check can take a minute)..."):
+    if run_uls_btn and ctx is not None and combos:
+        with st.spinner("Running the ULS check (biaxial combinations take longer)..."):
             R_new = run_uls(ctx, lay, g, act_uls)
             R_new["hash"] = uls_hash
             st.session_state["R_uls"] = R_new
@@ -323,54 +350,59 @@ with t_uls:
     if R_uls is not None:
         if R_uls.get("time"):
             with st.expander("Calculation time (seconds)"):
-                st.write({k: round(v, 1) for k, v in R_uls["time"].items()})
+                st.write({k_: round(v, 1) for k_, v in R_uls["time"].items()})
         views.uls_view(R_uls, ctx, R_uls["hash"] == uls_hash)
 
 # ============================================================ 5 SLS CHECK
+has_sls = element in ("Beam", "Generic section")
+sls_hash = None
 with t_sls:
-    st.subheader("Design actions (serviceability limit state)")
-    sls_dir = st.radio("Bending direction",
-                       ["Sagging (compression at top)",
-                        "Hogging (compression at bottom)"],
-                       horizontal=True, key="sdir")
-    st.caption("Service combination (stress limits)")
-    c1, c2 = st.columns(2)
-    n_ser = c1.number_input("N_ser (kN, compression +ve)", -5000.0, 50000.0, 0.0, key="nser")
-    m_ser = c2.number_input("M_ser (kNm, enter as positive)", 0.0, 50000.0, 100.0, key="mser")
-    st.caption("Quasi-permanent combination (crack width)")
-    c1, c2 = st.columns(2)
-    n_qp = c1.number_input("N_qp (kN, compression +ve)", -5000.0, 50000.0, 0.0, key="nqp")
-    m_qp = c2.number_input("M_qp (kNm, enter as positive)", 0.0, 50000.0, 80.0, key="mqp")
+    if not has_sls:
+        st.info("The SLS check is not provided for columns and walls.")
+    else:
+        st.subheader("Design actions (serviceability limit state)")
+        sls_dir = st.radio("Bending direction",
+                           ["Sagging (compression at top)",
+                            "Hogging (compression at bottom)"],
+                           horizontal=True, key="sdir")
+        st.caption("Service combination (stress limits)")
+        c1, c2 = st.columns(2)
+        n_ser = c1.number_input("N_ser (kN, compression +ve)", -5000.0, 50000.0, 0.0, key="nser")
+        m_ser = c2.number_input("M_ser (kNm, enter as positive)", 0.0, 50000.0, 100.0, key="mser")
+        st.caption("Quasi-permanent combination (crack width)")
+        c1, c2 = st.columns(2)
+        n_qp = c1.number_input("N_qp (kN, compression +ve)", -5000.0, 50000.0, 0.0, key="nqp")
+        m_qp = c2.number_input("M_qp (kNm, enter as positive)", 0.0, 50000.0, 80.0, key="mqp")
 
-    act_sls = dict(sagging=sls_dir.startswith("Sagging"), n_ser=n_ser, m_ser=m_ser,
-                   n_qp=n_qp, m_qp=m_qp)
-    sls_hash = digest(g, mat, act_sls)
+        act_sls = dict(sagging=sls_dir.startswith("Sagging"), n_ser=n_ser,
+                       m_ser=m_ser, n_qp=n_qp, m_qp=m_qp)
+        sls_hash = digest(g, mat, act_sls)
 
-    run_sls_btn = st.button("▶ Run SLS check", type="primary",
-                            disabled=ctx is None, key="sls_btn")
-    sls_box = st.empty()
-    if run_sls_btn and ctx is not None:
-        with st.spinner("Running the SLS check (this can take a minute)..."):
-            S_new = run_sls(ctx, lay, g, act_sls)
-            S_new["hash"] = sls_hash
-            st.session_state["R_sls"] = S_new
-    R_sls = st.session_state.get("R_sls")
-    status_line(sls_box, R_sls, sls_hash, "SLS check")
-    if R_sls is not None:
-        if R_sls.get("time"):
-            with st.expander("Calculation time (seconds)"):
-                st.write({k: round(v, 1) for k, v in R_sls["time"].items()})
-                for line in R_sls.get("mk_log", []):
-                    st.caption(line)
-        views.sls_view(R_sls)
+        run_sls_btn = st.button("▶ Run SLS check", type="primary",
+                                disabled=ctx is None, key="sls_btn")
+        sls_box = st.empty()
+        if run_sls_btn and ctx is not None:
+            with st.spinner("Running the SLS check (this can take a minute)..."):
+                S_new = run_sls(ctx, lay, g, act_sls)
+                S_new["hash"] = sls_hash
+                st.session_state["R_sls"] = S_new
+        R_sls = st.session_state.get("R_sls")
+        status_line(sls_box, R_sls, sls_hash, "SLS check")
+        if R_sls is not None:
+            if R_sls.get("time"):
+                with st.expander("Calculation time (seconds)"):
+                    st.write({k_: round(v, 1) for k_, v in R_sls["time"].items()})
+                    for line in R_sls.get("mk_log", []):
+                        st.caption(line)
+            views.sls_view(R_sls)
 
 # ====================================================== 3 SECTION RESULTS
 with t_res:
+    S_res = st.session_state.get("R_sls") if has_sls else None
     views.section_results(
-        ctx, G, st.session_state.get("R_sls"),
-        st.session_state.get("R_sls") is not None
-        and st.session_state["R_sls"]["hash"] == sls_hash)
+        ctx, G, S_res,
+        bool(S_res) and S_res["hash"] == sls_hash, has_sls)
 
 # ======================================================== 6 BEAM (phase 3)
 with t_beam:
-    st.info("Long-term beam deflection (simply supported or cantilever) comes in phase 3.")
+    st.info("Long-term beam deflection (simply supported or cantilever) comes in step 3.")
