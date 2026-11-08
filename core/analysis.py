@@ -426,112 +426,130 @@ def radial_capacity(mxs, mys, dx, dy):
     return best
 
 
-def run_uls(ctx, lay, g, act):
-    """ULS check: axial load with bending about x and y, and shear along y and x."""
+def _bending(ctx, c, act, cache):
+    """Bending check of one load combination (uniaxial or biaxial)."""
+    sec = ctx["sec"]
+    n_ed = c["n"] * 1e3
+    mx, my = c["mx"] * 1e6, c["my"] * 1e6
+    if abs(c["my"]) <= 1e-9:
+        theta = 0.0 if c["mx"] >= 0 else math.pi
+        res = sec.ultimate_bending_capacity(theta=theta, n=n_ed)
+        m_rd = abs(res.m_xy) / 1e6
+        return dict(kind="uniaxial", res=res, m_rd=m_rd, m_ed=abs(c["mx"]),
+                    d_n=getattr(res, "d_n", None), sagging=(theta == 0.0),
+                    util=(abs(c["mx"]) / m_rd if m_rd > 0 else None))
+
+    key = round(n_ed, 0)                       # one biaxial diagram per axial force
+    if key not in cache:
+        bb = sec.biaxial_bending_diagram(
+            n=n_ed, n_points=int(act["bb_points"]), progress_bar=False)
+        mxs, mys = bb.get_results_lists()
+        my_side = None                         # which face is compressed for M_y > 0
+        try:
+            probe = min(bb.results, key=lambda r: abs(r.theta - math.pi / 2))
+            dfp = bar_stress_table(
+                sec.calculate_ultimate_stress(ultimate_results=probe))
+            comp = dfp[dfp["Stress (MPa)"] > 1e-6]
+            ten = dfp[dfp["Stress (MPa)"] < -1e-6]
+            if not comp.empty and not ten.empty and abs(probe.m_y) > 1e-6:
+                plus_x = comp["x (mm)"].mean() > ten["x (mm)"].mean()
+                right = plus_x if probe.m_y > 0 else (not plus_x)
+                my_side = "right (+x)" if right else "left (-x)"
+        except Exception:
+            pass
+        cache[key] = dict(bb=bb, mxs=mxs, mys=mys, my_side=my_side)
+    d = cache[key]
+    bb, mxs, mys = d["bb"], d["mxs"], d["mys"]
+    demand = math.hypot(mx, my)
+    cap = radial_capacity(mxs, mys, mx, my)
+    try:
+        inside = bool(bb.point_in_diagram(mx, my))
+    except Exception:
+        inside = None
+    best = max(bb.results, key=lambda r: (r.m_x * mx + r.m_y * my)
+               / (math.hypot(r.m_x, r.m_y) or 1.0))
+    cap_pt = ((cap * mx / demand / 1e6, cap * my / demand / 1e6) if cap else (0.0, 0.0))
+    return dict(kind="biaxial", res=best, mx_ed=c["mx"], my_ed=c["my"],
+                m_res=demand / 1e6, cap=(cap / 1e6 if cap else None),
+                util=(demand / cap if cap else None), inside=inside,
+                my_side=d["my_side"], theta_best=best.theta,
+                diag=([m / 1e6 for m in mxs], [m / 1e6 for m in mys], cap_pt))
+
+
+def _shear(ctx, lay, g, act, c):
+    """Shear checks of one load combination, along y (major) and x (minor)."""
     mat = ctx["mat"]
-    sec, p, es = ctx["sec"], ctx["p"], ctx["es"]
-    R = {"err": {}, "img": {}, "time": {}, "act": act, "mat": mat, "p": p,
-         "fck": ctx["fck"], "fyd": ctx["fyd"]}
-    n_ed = act["n_ed"] * 1e3
-    mx, my = act["mx"] * 1e6, act["my"] * 1e6
-    biaxial = abs(act["my"]) > 1e-9
+    dims = auto_shear_dims(lay, c["mx"] >= 0)
+    use = dict(
+        bw_y=act["bw_y"] if act["bw_y"] > 0 else dims["bw_y"],
+        d_y=act["d_y"] if act["d_y"] > 0 else dims["d_y"],
+        bw_x=act["bw_x"] if act["bw_x"] > 0 else dims["bw_x"],
+        d_x=act["d_x"] if act["d_x"] > 0 else dims["d_x"],
+        asl_y=dims["asl_y"], asl_x=dims["asl_x"])
 
-    try:
-        with timed(R, "ULS bending"):
-            if not biaxial:
-                theta = 0.0 if act["mx"] >= 0 else math.pi
-                res = sec.ultimate_bending_capacity(theta=theta, n=n_ed)
-                uls = sec.calculate_ultimate_stress(ultimate_results=res)
-                df_u = bar_stress_table(uls)
-                R["bend"] = dict(kind="uniaxial", m_rd=abs(res.m_xy) / 1e6,
-                                 m_ed=abs(act["mx"]),
-                                 d_n=getattr(res, "d_n", None),
-                                 sagging=(theta == 0.0), df=df_u)
-            else:
-                bb = sec.biaxial_bending_diagram(
-                    n=n_ed, n_points=int(act["bb_points"]), progress_bar=False)
-                mxs, mys = bb.get_results_lists()
-                demand = math.hypot(mx, my)
-                cap = radial_capacity(mxs, mys, mx, my)
-                try:
-                    inside = bool(bb.point_in_diagram(mx, my))
-                except Exception:
-                    inside = None
-                best = max(bb.results, key=lambda r: (r.m_x * mx + r.m_y * my)
-                           / (math.hypot(r.m_x, r.m_y) or 1.0))
-                uls = sec.calculate_ultimate_stress(ultimate_results=best)
-                df_u = bar_stress_table(uls)
+    def one(v, bw, d, asl, legs):
+        return shear_check(
+            abs(v), bw, d, asl, lay["conc_area"], c["n"], ctx["fck"],
+            mat["gamma_c"], mat["acc_shear"], mat["fywk"], mat["gamma_s"],
+            g["link"], legs, act["s_link"], act["cot_mode"], act["cot_manual"],
+            g.get("c_nom"))
 
-                my_side = None                  # which face is compressed for M_y > 0
-                try:
-                    probe = min(bb.results, key=lambda r: abs(r.theta - math.pi / 2))
-                    dfp = bar_stress_table(
-                        sec.calculate_ultimate_stress(ultimate_results=probe))
-                    comp = dfp[dfp["Stress (MPa)"] > 1e-6]
-                    ten = dfp[dfp["Stress (MPa)"] < -1e-6]
-                    if not comp.empty and not ten.empty and abs(probe.m_y) > 1e-6:
-                        plus_x = comp["x (mm)"].mean() > ten["x (mm)"].mean()
-                        right = plus_x if probe.m_y > 0 else (not plus_x)
-                        my_side = "right (+x)" if right else "left (-x)"
-                except Exception:
-                    pass
+    return dict(
+        y=one(c["vy"], use["bw_y"], use["d_y"], use["asl_y"], act["legs_y"]),
+        x=one(c["vx"], use["bw_x"], use["d_x"], use["asl_x"], act["legs_x"]),
+        dims=use)
 
-                mxs_k = [m / 1e6 for m in mxs]
-                mys_k = [m / 1e6 for m in mys]
-                cap_pt = ((cap * mx / demand / 1e6, cap * my / demand / 1e6)
-                          if cap else (0.0, 0.0))
-                R["bend"] = dict(
-                    kind="biaxial", mx_ed=act["mx"], my_ed=act["my"],
-                    m_res=demand / 1e6, cap=(cap / 1e6 if cap else None),
-                    util=(demand / cap if cap else None), inside=inside,
-                    my_side=my_side, df=df_u, theta_best=best.theta)
-                R["img"]["biax"] = to_png(plot_biaxial(
-                    mxs_k, mys_k, act["mx"], act["my"], cap_pt, act["n_ed"]))
-            R["img"]["uls_conc"] = to_png(
-                soften(uls.plot_stress(render=False).get_figure()))
-            R["img"]["uls_bars"] = to_png(
-                plot_bar_stresses(sec, R["bend"]["df"], "Reinforcement stresses at ULS"))
+
+def run_uls(ctx, lay, g, act):
+    """ULS check of every load combination in act['combos']."""
+    mat = ctx["mat"]
+    R = {"err": {}, "img": {}, "time": {}, "act": act, "mat": mat, "p": ctx["p"],
+         "fck": ctx["fck"], "fyd": ctx["fyd"], "combos": []}
+    cache = {}
+    with timed(R, "ULS combinations"):
+        for i, c in enumerate(act["combos"]):
+            out = dict(name=f"{i + 1}: {c['name']}", n=c["n"], mx=c["mx"], my=c["my"],
+                       vy=c["vy"], vx=c["vx"], img={})
             try:
-                R["img"]["ss_conc"] = to_png(ctx["ult_profile"].plot_stress_strain(
-                    title=f"Concrete ultimate: {mat['ult_model']}",
-                    render=False).get_figure())
-                R["img"]["ss_steel"] = to_png(ctx["steel_profile"].plot_stress_strain(
-                    title="Steel: elastic-plastic", render=False).get_figure())
-            except Exception:
-                pass
-    except Exception as exc:
-        R["err"]["bend"] = repr(exc)
-
+                out["bend"] = _bending(ctx, c, act, cache)
+            except Exception as exc:
+                out["err_bend"] = repr(exc)
+            try:
+                out["shear"] = _shear(ctx, lay, g, act, c)
+            except Exception as exc:
+                out["err_shear"] = repr(exc)
+            R["combos"].append(out)
     try:
-        with timed(R, "ULS shear"):
-            dims = auto_shear_dims(lay, act["mx"] >= 0)
-            use = dict(
-                bw_y=act["bw_y"] if act["bw_y"] > 0 else dims["bw_y"],
-                d_y=act["d_y"] if act["d_y"] > 0 else dims["d_y"],
-                bw_x=act["bw_x"] if act["bw_x"] > 0 else dims["bw_x"],
-                d_x=act["d_x"] if act["d_x"] > 0 else dims["d_x"],
-                asl_y=dims["asl_y"], asl_x=dims["asl_x"])
-
-            def one(v, bw, d, asl, legs):
-                return shear_check(
-                    abs(v), bw, d, asl, lay["conc_area"], act["n_ed"], ctx["fck"],
-                    mat["gamma_c"], mat["acc_shear"], mat["fywk"], mat["gamma_s"],
-                    g["link"], legs, act["s_link"], act["cot_mode"],
-                    act["cot_manual"], g.get("c_nom"))
-
-            R["shear"] = dict(
-                y=one(act["vy"], use["bw_y"], use["d_y"], use["asl_y"], act["legs_y"]),
-                x=one(act["vx"], use["bw_x"], use["d_x"], use["asl_x"], act["legs_x"]),
-                dims=use)
-    except Exception as exc:
-        R["err"]["shear"] = repr(exc)
+        R["img"]["ss_conc"] = to_png(ctx["ult_profile"].plot_stress_strain(
+            title=f"Concrete ultimate: {mat['ult_model']}", render=False).get_figure())
+        R["img"]["ss_steel"] = to_png(ctx["steel_profile"].plot_stress_strain(
+            title="Steel: elastic-plastic", render=False).get_figure())
+    except Exception:
+        pass
     return R
 
 
-def compute_mn(ctx, R, both):
-    """Uniaxial M-N diagram about the x axis, on demand."""
-    sec, act, h_depth = ctx["sec"], R["act"], ctx["h_depth"]
-    sagging = act["mx"] >= 0
+def ensure_combo_images(ctx, combo):
+    """Stress plots of one combination, built on first use and then kept."""
+    b = combo.get("bend")
+    if b is None or "uls_bars" in combo["img"]:
+        return
+    sec = ctx["sec"]
+    uls = sec.calculate_ultimate_stress(ultimate_results=b["res"])
+    b["df"] = bar_stress_table(uls)
+    combo["img"]["uls_conc"] = to_png(soften(uls.plot_stress(render=False).get_figure()))
+    combo["img"]["uls_bars"] = to_png(
+        plot_bar_stresses(sec, b["df"], "Reinforcement stresses at ULS"))
+    if b["kind"] == "biaxial":
+        mxs_k, mys_k, cap_pt = b["diag"]
+        combo["img"]["biax"] = to_png(plot_biaxial(
+            mxs_k, mys_k, combo["mx"], combo["my"], cap_pt, combo["n"]))
+
+
+def compute_mn(ctx, combo, both):
+    """Uniaxial M-N diagram about the x axis for one combination, on demand."""
+    sec, h_depth = ctx["sec"], ctx["h_depth"]
+    sagging = combo["mx"] >= 0
     dirs = [(0.0, "Sagging"), (math.pi, "Hogging")]
     if not both:
         dirs = [dirs[0]] if sagging else [dirs[1]]
@@ -556,7 +574,7 @@ def compute_mn(ctx, R, both):
         if (th == 0.0 and sum(ms) < 0) or (th != 0.0 and sum(ms) > 0):
             ms = [-m for m in ms]
         curves[lab] = (ms, [n / 1e3 for n in n_list])
-    R["mn_err"] = errs
-    R["img"].pop("mn", None)
+    combo["mn_err"] = errs
+    combo["img"].pop("mn", None)
     if curves:
-        R["img"]["mn"] = to_png(plot_mn(curves, abs(act["mx"]), act["n_ed"], sagging))
+        combo["img"]["mn"] = to_png(plot_mn(curves, abs(combo["mx"]), combo["n"], sagging))
