@@ -334,7 +334,7 @@ if lay["ok"]:
 # ============================================================ 4 ULS CHECK
 with t_uls:
     st.subheader("Design actions (ultimate limit state)")
-        st.caption("One row per load combination. Import an Excel or CSV file below, or "
+    st.caption("One row per load combination. Import an Excel or CSV file below, or "
                "type the values in the table. Axial force: compression positive. "
                "M major = about the x axis (M > 0: compression at the top), "
                "M minor = about the y axis. Shear signs are ignored.")
