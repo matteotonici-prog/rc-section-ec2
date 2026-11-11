@@ -23,6 +23,65 @@ LAYER_COLS = {
 }
 COMBO_COLS = ["N (kN)", "V major (kN)", "V minor (kN)", "M major (kNm)", "M minor (kNm)"]
 
+ALIASES = {
+    "Combo": {"combo", "combination", "name", "case", "loadcase", "lc", "id"},
+    "N (kN)": {"n", "nkn", "ned", "nedkn", "axial", "axialforce", "axialkn"},
+    "V major (kN)": {"vmajor", "vmajorkn", "majorshear", "vmaj", "vy", "vedy"},
+    "V minor (kN)": {"vminor", "vminorkn", "minorshear", "vmin", "vx", "vedx"},
+    "M major (kNm)": {"mmajor", "mmajorknm", "majormoment", "mmaj", "mx", "medx"},
+    "M minor (kNm)": {"mminor", "mminorknm", "minormoment", "mmin", "my", "medy"},
+}
+
+
+def read_combos(data, filename, sheet=None):
+    """Read load combinations from an .xlsx or .csv file into the app table format."""
+    if filename.lower().endswith(".csv"):
+        raw = pd.read_csv(io.BytesIO(data), sep=None, engine="python")
+    else:
+        raw = pd.read_excel(io.BytesIO(data), sheet_name=sheet if sheet else 0)
+    raw = raw.dropna(how="all").dropna(axis=1, how="all").reset_index(drop=True)
+    if raw.empty:
+        raise ValueError("The sheet is empty.")
+
+    def num(s):
+        if s.dtype == object:
+            s = s.astype(str).str.replace(",", ".", regex=False)
+        return pd.to_numeric(s, errors="coerce")
+
+    norm = {c: re.sub(r"[^a-z0-9]", "", str(c).lower()) for c in raw.columns}
+    found = {}
+    for target, aliases in ALIASES.items():
+        for col, nm in norm.items():
+            if nm in aliases and col not in found.values():
+                found[target] = col
+                break
+
+    note = ""
+    if any(t not in found for t in COMBO_COLS):      # headers not recognised
+        cand = [c for c in raw.columns if num(raw[c]).notna().mean() > 0.8]
+        if len(cand) < 5:
+            raise ValueError(
+                "Could not find the five numeric columns. Expected headers: "
+                + ", ".join(COMBO_COLS) + ". Found: "
+                + ", ".join(str(c) for c in raw.columns)
+                + ". The first row of the sheet must be the header row.")
+        found = dict(zip(COMBO_COLS, cand[:5]))
+        note = (" (headers not recognised: columns taken by position, "
+                + ", ".join(str(c) for c in cand[:5]) + ")")
+    if "Combo" not in found:
+        for c in raw.columns:
+            if c not in found.values() and num(raw[c]).notna().mean() <= 0.8:
+                found["Combo"] = c
+                break
+
+    out = pd.DataFrame()
+    if "Combo" in found:
+        out["Combo"] = raw[found["Combo"]].fillna("").astype(str)
+    else:
+        out["Combo"] = [f"Combo {i + 1}" for i in range(len(raw))]
+    for t in COMBO_COLS:
+        out[t] = num(raw[found[t]]).fillna(0.0).astype(float)
+    return out, note
 
 def _ser(o):
     return o.to_json() if hasattr(o, "to_json") else str(o)
