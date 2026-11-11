@@ -334,15 +334,45 @@ if lay["ok"]:
 # ============================================================ 4 ULS CHECK
 with t_uls:
     st.subheader("Design actions (ultimate limit state)")
-    st.caption("One row per load combination. You can paste straight from Excel: "
-               "click the first cell and press Ctrl+V. Axial force: compression "
-               "positive. M major = about the x axis (M > 0: compression at the top), "
+        st.caption("One row per load combination. Import an Excel or CSV file below, or "
+               "type the values in the table. Axial force: compression positive. "
+               "M major = about the x axis (M > 0: compression at the top), "
                "M minor = about the y axis. Shear signs are ignored.")
-    default_combos = pd.DataFrame({
-        "Combo": ["ULS 1"], "N (kN)": [0.0], "V major (kN)": [0.0],
-        "V minor (kN)": [0.0], "M major (kNm)": [150.0], "M minor (kNm)": [0.0]})
+    if "combos_src" not in st.session_state:
+        st.session_state["combos_src"] = pd.DataFrame({
+            "Combo": ["ULS 1"], "N (kN)": [0.0], "V major (kN)": [0.0],
+            "V minor (kN)": [0.0], "M major (kNm)": [150.0], "M minor (kNm)": [0.0]})
+        st.session_state["combos_ver"] = 0
+    up = st.file_uploader("Import combinations from Excel (.xlsx) or CSV",
+                          type=["xlsx", "csv"], key="combos_up")
+    if up is None:
+        st.session_state["combos_sig"] = None
+    else:
+        data = up.getvalue()
+        sheet = None
+        if up.name.lower().endswith(".xlsx"):
+            names = pd.ExcelFile(io.BytesIO(data)).sheet_names
+            if len(names) > 1:
+                sheet = st.selectbox("Sheet to import", names, key="combos_sheet")
+        sig = (up.name, len(data), sheet)
+        if st.session_state.get("combos_sig") != sig:
+            st.session_state["combos_sig"] = sig
+            try:
+                new, note = read_combos(data, up.name, sheet)
+                st.session_state["combos_src"] = new
+                st.session_state["combos_ver"] += 1
+                st.session_state["combos_msg"] = (
+                    "ok", f"Imported {len(new)} combinations from {up.name}{note}.")
+            except Exception as exc:
+                st.session_state["combos_msg"] = ("err", f"Import failed: {exc}")
+        kind, text = st.session_state.get("combos_msg", (None, None))
+        if kind == "ok":
+            st.success(text)
+        elif kind == "err":
+            st.error(text)
     combos_df = st.data_editor(
-        default_combos, num_rows="dynamic", key=f"combos_{element}",
+        st.session_state["combos_src"], num_rows="dynamic",
+        key=f"combos_{element}_{st.session_state['combos_ver']}",
         column_config={c: st.column_config.NumberColumn(c, format="%.1f")
                        for c in COMBO_COLS})
     cdf = combos_df.dropna(how="all").copy()
